@@ -1,0 +1,126 @@
+#!/bin/sh
+# Remotly agent installer for macOS and Linux.
+# Usage: curl -kfsSL "{{.URL}}/install/agent.sh?key=<ENROLL-KEY>" | sh
+set -eu
+
+SERVER="{{.URL}}"
+KEY="{{.Key}}"
+CA_FP="{{.CAFingerprint}}"
+
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$(uname -m)" in
+  x86_64|amd64) ARCH=amd64 ;;
+  arm64|aarch64) ARCH=arm64 ;;
+  *) echo "Nicht unterstützte Architektur: $(uname -m)" >&2; exit 1 ;;
+esac
+FILE="remotly-agent-$OS-$ARCH"
+case "$FILE" in
+{{- range $file, $hash := .Hashes}}
+  {{$file}}) SHA256="{{$hash}}" ;;
+{{- end}}
+  *) echo "Der Server bietet keinen Agent für $OS/$ARCH an." >&2; exit 1 ;;
+esac
+
+case "$OS" in
+  darwin) DIR="$HOME/Library/Application Support/Remotly" ;;
+  linux)  DIR="$HOME/.local/share/remotly" ;;
+esac
+BIN="$DIR/remotly-agent"
+mkdir -p "$DIR"
+
+echo "==> Lade Agent ($OS/$ARCH)"
+curl -kfsSL "$SERVER/download/$FILE" -o "$BIN.tmp"
+if command -v sha256sum >/dev/null 2>&1; then
+  GOT=$(sha256sum "$BIN.tmp" | cut -d' ' -f1)
+else
+  GOT=$(shasum -a 256 "$BIN.tmp" | cut -d' ' -f1)
+fi
+if [ "$GOT" != "$SHA256" ]; then
+  rm -f "$BIN.tmp"
+  echo "!! Prüfsumme stimmt nicht – Download manipuliert oder beschädigt. Abbruch." >&2
+  exit 1
+fi
+chmod 755 "$BIN.tmp"
+mv -f "$BIN.tmp" "$BIN"
+
+# ffmpeg does the screen capture and (hardware) encoding.
+if ! command -v ffmpeg >/dev/null 2>&1 && [ ! -x /opt/homebrew/bin/ffmpeg ] && [ ! -x /usr/local/bin/ffmpeg ]; then
+  if [ "$OS" = darwin ] && command -v brew >/dev/null 2>&1; then
+    echo "==> Installiere ffmpeg über Homebrew"
+    brew install ffmpeg
+  elif [ "$OS" = linux ] && command -v apt-get >/dev/null 2>&1; then
+    echo "==> Installiere ffmpeg, xdotool, xclip (sudo)"
+    sudo apt-get install -y ffmpeg xdotool xclip
+  elif [ "$OS" = linux ] && command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y ffmpeg xdotool xclip
+  elif [ "$OS" = linux ] && command -v pacman >/dev/null 2>&1; then
+    sudo pacman -S --noconfirm ffmpeg xdotool xclip
+  else
+    echo "!! ffmpeg nicht gefunden. Bitte installieren (macOS: 'brew install ffmpeg')." >&2
+  fi
+fi
+
+echo "==> Registriere Gerät beim Server"
+"$BIN" enroll --server "$SERVER" --key "$KEY" --ca-fingerprint "$CA_FP"
+
+if [ "$OS" = darwin ]; then
+  PLIST="$HOME/Library/LaunchAgents/com.remotly.agent.plist"
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.remotly.agent</string>
+  <key>ProgramArguments</key>
+  <array><string>$BIN</string><string>run</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/remotly-agent.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/remotly-agent.log</string>
+</dict>
+</plist>
+EOF
+  launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  echo
+  echo "==> Fertig. Der Agent startet automatisch bei jeder Anmeldung."
+  echo
+  echo "WICHTIG – macOS braucht zwei Berechtigungen für:"
+  echo "    $BIN"
+  echo "  1. Systemeinstellungen > Datenschutz & Sicherheit > Bildschirm- & Systemaudioaufnahme"
+  echo "  2. Systemeinstellungen > Datenschutz & Sicherheit > Bedienungshilfen"
+  echo "Mit '+' hinzufügen (Cmd+Shift+G, Pfad einfügen), danach:"
+  echo "    launchctl kickstart -k gui/$(id -u)/com.remotly.agent"
+  echo "Ton: optional BlackHole installieren (brew install blackhole-2ch) und als Ausgabe wählen."
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture" 2>/dev/null || true
+  echo "Log: ~/Library/Logs/remotly-agent.log"
+else
+  UNIT_DIR="$HOME/.config/systemd/user"
+  mkdir -p "$UNIT_DIR"
+  cat > "$UNIT_DIR/remotly-agent.service" <<EOF
+[Unit]
+Description=Remotly agent
+After=graphical-session.target
+
+[Service]
+ExecStart=$BIN run
+Environment=DISPLAY=${DISPLAY:-:0}
+Environment=XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user enable --now remotly-agent.service
+  loginctl enable-linger "$(id -un)" 2>/dev/null || true
+  echo
+  echo "==> Fertig. Status: systemctl --user status remotly-agent"
+  echo "Hinweis: Bildschirmaufnahme unter Linux benötigt eine X11-Sitzung."
+fi

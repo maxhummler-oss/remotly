@@ -1,0 +1,118 @@
+# Remotly agent installer for Windows.
+# In PowerShell "Als Administrator ausführen":
+#   [Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; irm "{{.URL}}/install/agent.ps1?key=<ENROLL-KEY>" | iex
+#
+# With admin rights the agent is installed as a Windows service (recommended
+# for rack PCs): it then also works on the lock screen, at the logon screen
+# after a reboot and for UAC prompts. Without admin rights it runs as a
+# per-user task (only while the user is logged in).
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+$Server = '{{.URL}}'
+$Key = '{{.Key}}'
+$CAFingerprint = '{{.CAFingerprint}}'
+$Hashes = @{
+{{- range $file, $hash := .Hashes}}
+  '{{$file}}' = '{{$hash}}'
+{{- end}}
+}
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Trust exactly our server CA (pinned by fingerprint), nothing else.
+[Net.ServicePointManager]::ServerCertificateValidationCallback = {
+  param($sender, $cert, $chain, $errors)
+  if ($errors -eq 'None') { return $true }
+  if (-not $CAFingerprint) { return $true }
+  foreach ($el in $chain.ChainElements) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $fp = ([BitConverter]::ToString($sha.ComputeHash($el.Certificate.RawData)) -replace '-', '').ToLower()
+    if ($fp -eq $CAFingerprint) { return $true }
+  }
+  return $false
+}
+
+$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
+$file = "remotly-agent-windows-$arch.exe"
+if (-not $Hashes.ContainsKey($file)) { throw "Der Server bietet keinen Agent für windows/$arch an." }
+
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+  [Security.Principal.WindowsBuiltInRole]::Administrator)
+$dir = if ($isAdmin) { Join-Path $env:ProgramFiles 'Remotly' } else { Join-Path $env:LOCALAPPDATA 'Remotly' }
+$exe = Join-Path $dir 'remotly-agent.exe'
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+Write-Host '==> Stoppe alte Installation (falls vorhanden)'
+if (Get-Service RemotlyAgent -ErrorAction SilentlyContinue) {
+  Stop-Service RemotlyAgent -Force -ErrorAction SilentlyContinue
+}
+Get-ScheduledTask -TaskName 'Remotly Agent' -ErrorAction SilentlyContinue | Stop-ScheduledTask -ErrorAction SilentlyContinue
+Get-Process remotly-agent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 800
+
+Write-Host "==> Lade Agent (windows/$arch)"
+$tmp = "$exe.download"
+Invoke-WebRequest -UseBasicParsing -Uri "$Server/download/$file" -OutFile $tmp
+$got = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
+if ($got -ne $Hashes[$file]) {
+  Remove-Item $tmp -Force
+  throw 'Prüfsumme stimmt nicht – Download manipuliert oder beschädigt. Abbruch.'
+}
+Move-Item $tmp $exe -Force
+
+# ffmpeg handles capture (Desktop Duplication) and hardware encoding.
+$ffLocal = Join-Path $dir 'ffmpeg.exe'
+if (-not (Test-Path $ffLocal)) {
+  $ff = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
+  if (-not $ff -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Write-Host '==> Installiere ffmpeg über winget'
+    winget install --id Gyan.FFmpeg -e --silent --accept-source-agreements --accept-package-agreements | Out-Host
+    $ff = Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\WinGet", "$env:ProgramFiles\WinGet" -Recurse -Filter ffmpeg.exe -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -like '*\bin\ffmpeg.exe' } | Select-Object -First 1 -ExpandProperty FullName
+  }
+  if ($ff) {
+    Copy-Item $ff $ffLocal -Force
+  } else {
+    Write-Warning "ffmpeg nicht gefunden. Bitte ffmpeg.exe nach $dir kopieren (https://www.gyan.dev/ffmpeg/builds/)."
+  }
+}
+
+Write-Host '==> Registriere Gerät beim Server'
+$cfg = Join-Path $dir 'agent.json'
+if (-not (Test-Path $cfg)) {
+  $p = Start-Process -FilePath $exe -ArgumentList @('enroll', '--server', $Server, '--key', $Key, '--ca-fingerprint', $CAFingerprint) -Wait -NoNewWindow -PassThru
+  if ($p.ExitCode -ne 0) { throw 'Registrierung fehlgeschlagen (siehe Ausgabe oben).' }
+} else {
+  Write-Host '   bereits registriert, behalte bestehende Konfiguration'
+}
+
+if ($isAdmin) {
+  # Only SYSTEM and Administrators may read the device secret.
+  icacls $cfg /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+
+  Get-NetFirewallRule -DisplayName 'Remotly Agent' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+  New-NetFirewallRule -DisplayName 'Remotly Agent' -Direction Inbound -Program $exe -Action Allow -Protocol UDP -Profile Domain,Private | Out-Null
+
+  Write-Host '==> Installiere Windows-Dienst'
+  Unregister-ScheduledTask -TaskName 'Remotly Agent' -Confirm:$false -ErrorAction SilentlyContinue
+  $p = Start-Process -FilePath $exe -ArgumentList @('service', 'install') -Wait -NoNewWindow -PassThru
+  if ($p.ExitCode -ne 0) { throw 'Dienst-Installation fehlgeschlagen.' }
+  Start-Service RemotlyAgent
+  # Keep the machine reachable: no sleep on AC power.
+  powercfg /change standby-timeout-ac 0 | Out-Null
+  powercfg /change hibernate-timeout-ac 0 | Out-Null
+  Write-Host ''
+  Write-Host '==> Fertig. Der Remotly-Dienst läuft (auch am Sperr- und Anmeldebildschirm).'
+} else {
+  $user = "$env:USERDOMAIN\$env:USERNAME"
+  $action = New-ScheduledTaskAction -Execute $exe -Argument "run --log `"$dir\agent.log`""
+  $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+  $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+  Register-ScheduledTask -TaskName 'Remotly Agent' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+  Start-ScheduledTask -TaskName 'Remotly Agent'
+  Write-Host ''
+  Write-Host '==> Fertig (Benutzer-Modus). Für Sperrbildschirm/Anmeldung/UAC als Administrator erneut ausführen.'
+}
+Write-Host "Log: $dir\agent.log"
