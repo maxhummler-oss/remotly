@@ -36,7 +36,7 @@ type Config struct {
 	Encoder          string   `json:"encoder"` // auto | h264_nvenc | h264_qsv | h264_amf | h264_videotoolbox | libx264
 	Capture          string   `json:"capture"` // auto | ddagrab | gdigrab | avfoundation | x11grab
 	Display          int      `json:"display"`
-	FPS              int      `json:"fps"`
+	FPS              int      `json:"fps"` // 0 = auto (120 with a Windows hardware encoder, else 60)
 	BitrateKbps      int      `json:"bitrateKbps"`
 	MaxWidth         int      `json:"maxWidth"` // 0 = native resolution (enables zero-copy on Windows)
 	KeyframeInterval float64  `json:"keyframeInterval"`
@@ -78,7 +78,6 @@ func defaults() Config {
 	return Config{
 		Encoder:          "auto",
 		Capture:          "auto",
-		FPS:              60,
 		BitrateKbps:      30000,
 		KeyframeInterval: 4,
 		LocalCursor:      "auto",
@@ -119,8 +118,8 @@ func (c *Config) Validate() error {
 	if c.Server == "" || c.DeviceID == "" || c.Secret == "" {
 		return errors.New("device not enrolled (run 'remotly-agent enroll')")
 	}
-	if c.FPS <= 0 || c.FPS > 240 {
-		c.FPS = 60
+	if c.FPS < 0 || c.FPS > 240 {
+		c.FPS = 0
 	}
 	if c.BitrateKbps <= 0 {
 		c.BitrateKbps = 30000

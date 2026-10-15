@@ -82,6 +82,15 @@ func CodecOf(encoder string) Codec {
 	return H264
 }
 
+// IsHardware reports whether an encoder runs on dedicated hardware.
+func IsHardware(enc string) bool {
+	switch enc {
+	case "h264_nvenc", "h264_amf", "h264_qsv", "h264_videotoolbox":
+		return true
+	}
+	return false
+}
+
 // encoderPreference lists encoders in order of preference per OS.
 func encoderPreference(codec Codec) []string {
 	if codec == VP8 {

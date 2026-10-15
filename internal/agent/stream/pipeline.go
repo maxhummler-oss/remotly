@@ -49,6 +49,9 @@ func NewPipeline(opts Options, encoder string) *Pipeline {
 	return &Pipeline{opts: opts, encoder: encoder, variants: Variants(opts, encoder), subs: map[Sink]*subscriber{}}
 }
 
+// FPS returns the capture frame rate.
+func (p *Pipeline) FPS() int { return p.opts.FPS }
+
 // Codec returns the codec this pipeline produces.
 func (p *Pipeline) Codec() Codec { return CodecOf(p.encoder) }
 

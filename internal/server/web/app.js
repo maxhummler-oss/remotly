@@ -5,6 +5,7 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const params = new URLSearchParams(location.search);
 const KIOSK = params.has('kiosk');
+const KIOSK_IDLE_MS = 2 * 60 * 1000; // shared thin clients: log out when idle
 
 const state = {
   me: null,
@@ -14,6 +15,50 @@ const state = {
   admin: null,
   session: null,
 };
+
+// ---------------------------------------------------------------------------
+// Icons (stroke, 24×24) and OS logos
+
+const ICONS = {
+  display: '<rect x="3" y="4" width="18" height="12" rx="2.5"/><path d="M9 20h6M12 16v4"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  shield: '<path d="M12 3l7 3v6c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/>',
+  sliders: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
+  logout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>',
+  speaker: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 9a4 4 0 0 1 0 6M19.5 6.5a8 8 0 0 1 0 11"/>',
+  mute: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 9l5 6M22 9l-5 6"/>',
+  expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+  target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>',
+  keyboard: '<rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/>',
+  gauge: '<path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6"/>',
+  close: '<path d="M6 6l12 12M18 6L6 18"/>',
+  power: '<path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/>',
+  arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/>',
+  alert: '<path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18h.01"/>',
+  check: '<path d="M5 12l5 5 9-10"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+};
+function icon(name) {
+  return `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
+}
+function hydrateIcons(root = document) {
+  root.querySelectorAll('[data-icon]').forEach((e) => {
+    if (!e.querySelector('svg')) e.insertAdjacentHTML('afterbegin', icon(e.dataset.icon));
+  });
+}
+
+const OS_ICONS = {
+  windows: '<svg viewBox="0 0 24 24"><path d="M3 5.5 10.5 4.5v7H3zM11.5 4.4 21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zM11.5 12.5H21V21l-9.5-1.4z"/></svg>',
+  darwin: '<svg viewBox="0 0 24 24"><path d="M16.4 12.6c0-2.5 2-3.6 2.1-3.7-1.2-1.7-3-1.9-3.6-2-1.5-.2-3 .9-3.8.9-.8 0-2-.9-3.3-.9-1.7 0-3.3 1-4.1 2.5-1.8 3.1-.5 7.6 1.3 10.1.8 1.2 1.8 2.6 3.1 2.5 1.3-.1 1.7-.8 3.2-.8s1.9.8 3.2.8c1.4 0 2.2-1.2 3-2.4.9-1.4 1.3-2.7 1.3-2.8-.1 0-2.4-.9-2.4-3.2zM14 5.3c.7-.8 1.1-1.9 1-3-1 0-2.2.7-2.9 1.5-.6.7-1.2 1.8-1 2.9 1.1.1 2.2-.6 2.9-1.4z"/></svg>',
+  linux: '<svg viewBox="0 0 24 24"><path d="M12 2c-2.2 0-3.5 1.9-3.5 4.4 0 1.4.4 2.4-.4 3.9-.9 1.6-2.6 3.5-2.6 6.3 0 .6.1 1.1.3 1.6-.6.4-1.3.9-1.3 1.6 0 1.2 1.9 1.4 3.6 1.9 1 .3 1.6.3 2.2-.2.5.2 1.1.3 1.7.3s1.2-.1 1.7-.3c.6.5 1.2.5 2.2.2 1.7-.5 3.6-.7 3.6-1.9 0-.7-.7-1.2-1.3-1.6.2-.5.3-1 .3-1.6 0-2.8-1.7-4.7-2.6-6.3-.8-1.5-.4-2.5-.4-3.9C15.5 3.9 14.2 2 12 2zm-1.5 4.2c.4 0 .7.5.7 1.1s-.3 1.1-.7 1.1-.7-.5-.7-1.1.3-1.1.7-1.1zm3 0c.4 0 .7.5.7 1.1s-.3 1.1-.7 1.1-.7-.5-.7-1.1.3-1.1.7-1.1zM12 9.4c.9 0 2 .6 2 1s-1.1 1-2 1-2-.6-2-1 1.1-1 2-1z"/></svg>',
+};
+const OS_NAMES = { windows: 'Windows', darwin: 'macOS', linux: 'Linux' };
+const osIcon = (os) => el('div', { class: 'os-icon', html: OS_ICONS[os] || OS_ICONS.linux });
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -34,14 +79,24 @@ function el(tag, attrs = {}, ...children) {
   return e;
 }
 
+function btn(label, opts = {}) {
+  const b = el('button', { type: 'button', class: 'btn ' + (opts.cls || ''), title: opts.title, disabled: opts.disabled, onclick: opts.onclick });
+  if (opts.icon) b.insertAdjacentHTML('afterbegin', icon(opts.icon));
+  if (label) b.append(label);
+  return b;
+}
+
 let toastTimer;
-function toast(msg, isError = false) {
+function toast(msg, isError = false, ms) {
   const t = $('#toast');
-  t.textContent = msg;
+  $('#toast-text').textContent = msg;
+  $('#toast-icon').innerHTML = icon(isError ? 'alert' : 'info');
   t.classList.toggle('err', isError);
+  t.classList.add('hidden');
+  void t.offsetWidth; // restart the entry animation
   t.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.add('hidden'), isError ? 6000 : 3500);
+  toastTimer = setTimeout(() => t.classList.add('hidden'), ms || (isError ? 6000 : 3500));
 }
 
 async function api(method, path, body) {
@@ -63,9 +118,11 @@ async function api(method, path, body) {
 }
 
 function show(view) {
-  for (const v of ['login', 'app', 'kiosk', 'session']) {
+  for (const v of ['login', 'setup2fa', 'app', 'kiosk', 'session']) {
     $('#view-' + v).classList.toggle('hidden', v !== view);
   }
+  document.body.classList.toggle('in-session', view === 'session');
+  if (view === 'app') requestAnimationFrame(moveSegThumb);
 }
 
 function fmtTime(iso) {
@@ -84,14 +141,6 @@ function fmtDuration(iso) {
   return h ? `${h} Std. ${m} Min.` : `${m} Min.`;
 }
 
-const OS_ICONS = {
-  windows: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5 10.5 4.5v7H3zM11.5 4.4 21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zM11.5 12.5H21V21l-9.5-1.4z"/></svg>',
-  darwin: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.4 12.6c0-2.5 2-3.6 2.1-3.7-1.2-1.7-3-1.9-3.6-2-1.5-.2-3 .9-3.8.9-.8 0-2-.9-3.3-.9-1.7 0-3.3 1-4.1 2.5-1.8 3.1-.5 7.6 1.3 10.1.8 1.2 1.8 2.6 3.1 2.5 1.3-.1 1.7-.8 3.2-.8s1.9.8 3.2.8c1.4 0 2.2-1.2 3-2.4.9-1.4 1.3-2.7 1.3-2.8-.1 0-2.4-.9-2.4-3.2zM14 5.3c.7-.8 1.1-1.9 1-3-1 0-2.2.7-2.9 1.5-.6.7-1.2 1.8-1 2.9 1.1.1 2.2-.6 2.9-1.4z"/></svg>',
-  linux: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c-2.2 0-3.5 1.9-3.5 4.4 0 1.4.4 2.4-.4 3.9-.9 1.6-2.6 3.5-2.6 6.3 0 .6.1 1.1.3 1.6-.6.4-1.3.9-1.3 1.6 0 1.2 1.9 1.4 3.6 1.9 1 .3 1.6.3 2.2-.2.5.2 1.1.3 1.7.3s1.2-.1 1.7-.3c.6.5 1.2.5 2.2.2 1.7-.5 3.6-.7 3.6-1.9 0-.7-.7-1.2-1.3-1.6.2-.5.3-1 .3-1.6 0-2.8-1.7-4.7-2.6-6.3-.8-1.5-.4-2.5-.4-3.9C15.5 3.9 14.2 2 12 2zm-1.5 4.2c.4 0 .7.5.7 1.1s-.3 1.1-.7 1.1-.7-.5-.7-1.1.3-1.1.7-1.1zm3 0c.4 0 .7.5.7 1.1s-.3 1.1-.7 1.1-.7-.5-.7-1.1.3-1.1.7-1.1zM12 9.4c.9 0 2 .6 2 1s-1.1 1-2 1-2-.6-2-1 1.1-1 2-1z"/></svg>',
-};
-const OS_NAMES = { windows: 'Windows', darwin: 'macOS', linux: 'Linux' };
-const osIcon = (os) => el('div', { class: 'os-icon', html: OS_ICONS[os] || OS_ICONS.linux });
-
 function initials(name) {
   return (name || '?').split(/\s+/).map((p) => p[0]).join('').slice(0, 2).toUpperCase();
 }
@@ -105,18 +154,20 @@ async function copyText(text) {
   }
 }
 
-// Generic dialog. fields: [{name,label,type,value,placeholder,required,options}]
-function dialog({ title, body, okText = 'OK', danger = false, onOk }) {
+// Sheet dialog. body: Node or Node[]; onOk may throw to show an error.
+function dialog({ title, body, okText = 'OK', danger = false, cancel = true, onOk }) {
   const dlg = $('#dlg');
   $('#dlg-title').textContent = title;
   const b = $('#dlg-body');
-  b.replaceChildren(...(Array.isArray(body) ? body : [body]));
+  b.replaceChildren(...(Array.isArray(body) ? body : [body]).filter(Boolean));
+  hydrateIcons(b);
   $('#dlg-error').textContent = '';
   const ok = $('#dlg-ok');
   ok.textContent = okText;
-  ok.className = 'btn ' + (danger ? 'danger' : 'primary');
+  ok.className = 'btn ' + (danger ? 'danger solid' : 'primary');
+  $('#dlg-cancel').classList.toggle('hidden', !cancel);
   return new Promise((resolve) => {
-    const submit = async (ev) => {
+    $('#dlg-form').onsubmit = async (ev) => {
       ev.preventDefault();
       if (ev.submitter && ev.submitter.value === 'cancel') { dlg.close(); return; }
       ok.disabled = true;
@@ -130,8 +181,6 @@ function dialog({ title, body, okText = 'OK', danger = false, onOk }) {
         ok.disabled = false;
       }
     };
-    const form = $('#dlg-form');
-    form.onsubmit = submit;
     dlg.onclose = () => resolve(undefined);
     dlg.showModal();
     const first = b.querySelector('input:not([type=checkbox])');
@@ -140,62 +189,162 @@ function dialog({ title, body, okText = 'OK', danger = false, onOk }) {
 }
 
 const field = (label, input) => el('label', { class: 'field' }, el('span', {}, label), input);
-const check = (label, input) => el('label', { class: 'check' }, input, el('span', {}, label));
+const check = (label, input) => el('label', { class: 'check' }, el('span', {}, label), input);
 
 // ---------------------------------------------------------------------------
-// Login
+// Login (password, then optional authenticator code)
+
+let loginNeedsCode = false;
 
 async function boot() {
+  hydrateIcons();
   try {
     state.me = await api('GET', '/api/me');
     enterApp();
   } catch (e) {
-    const info = (e.data) || {};
-    $('#login-server').textContent = info.serverName && info.serverName !== 'Remotly' ? info.serverName : 'Fernzugriff auf deine Arbeitsplatzrechner';
+    const info = e.data || {};
+    if (info.serverName && info.serverName !== 'Remotly') $('#login-server').textContent = info.serverName;
     $('#login-setup').classList.toggle('hidden', !info.needsSetup);
-    show('login');
-    $('#login-user').focus();
+    showLogin();
   }
 }
 
+function showLogin() {
+  setLoginStep(false);
+  show('login');
+  $('#login-user').focus();
+}
+
+function setLoginStep(code) {
+  loginNeedsCode = code;
+  $('#login-step-pass').classList.toggle('hidden', code);
+  $('#login-step-code').classList.toggle('hidden', !code);
+  $('#login-back').classList.toggle('hidden', !code);
+  $('#login-submit').textContent = code ? 'Bestätigen' : 'Anmelden';
+  $('#login-user').required = !code;
+  $('#login-pass').required = !code;
+  if (code) { $('#login-code').value = ''; $('#login-code').focus(); }
+}
+
+$('#login-back').addEventListener('click', () => { $('#login-error').textContent = ''; setLoginStep(false); });
+// Submit automatically once six digits were entered (or pasted).
+$('#login-code').addEventListener('input', (ev) => {
+  if (ev.target.value.replace(/\D/g, '').length === 6) $('#login-form').requestSubmit();
+});
+
 $('#login-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
-  const btn = $('#login-submit');
-  btn.disabled = true;
+  const submit = $('#login-submit');
+  submit.disabled = true;
   $('#login-error').textContent = '';
   try {
-    state.me = await api('POST', '/api/login', { username: $('#login-user').value, password: $('#login-pass').value });
+    const body = { username: $('#login-user').value, password: $('#login-pass').value };
+    if (loginNeedsCode) body.code = $('#login-code').value.replace(/\D/g, '');
+    state.me = await api('POST', '/api/login', body);
     $('#login-pass').value = '';
+    $('#login-code').value = '';
     enterApp();
   } catch (e) {
-    $('#login-error').textContent = e.message;
+    if (e.data && e.data.needsCode && !loginNeedsCode) {
+      setLoginStep(true);
+    } else {
+      $('#login-error').textContent = e.message;
+      if (loginNeedsCode) { $('#login-code').value = ''; $('#login-code').focus(); }
+    }
   } finally {
-    btn.disabled = false;
+    submit.disabled = false;
   }
 });
 
 async function logout() {
   try { await api('POST', '/api/logout'); } catch { /* ignore */ }
+  if (state.session) state.session.close('logout');
   if (state.ws) { state.ws.onclose = null; state.ws.close(); }
   state.ws = null;
   state.me = null;
-  show('login');
+  clearInterval(adminTimer);
+  $('#login-pass').value = '';
+  $('#toast').classList.add('hidden');
+  showLogin();
 }
 
 function enterApp() {
   const me = state.me;
-  document.title = `${me.serverName || 'Remotly'}`;
-  $('#server-name').textContent = me.serverName && me.serverName !== 'Remotly' ? '· ' + me.serverName : '';
+  if (me.mustSetup2FA) {
+    show('setup2fa');
+    return;
+  }
+  document.title = me.serverName && me.serverName !== 'Remotly' ? `Remotly · ${me.serverName}` : 'Remotly';
+  $('#server-name').textContent = me.serverName && me.serverName !== 'Remotly' ? me.serverName : '';
   $('#user-name').textContent = me.displayName;
   $('#user-avatar').textContent = initials(me.displayName);
+  $('#menu-name').textContent = me.displayName;
+  $('#menu-login').textContent = me.name + (me.admin ? ' · Administrator' : '');
+  $('#menu-2fa').textContent = me.totp ? 'Zwei-Faktor-Anmeldung: aktiv' : 'Zwei-Faktor-Anmeldung einrichten';
   $('#tab-admin').classList.toggle('hidden', !me.admin || KIOSK);
+  const hour = new Date().getHours();
+  const hello = hour < 11 ? 'Guten Morgen' : hour < 18 ? 'Hallo' : 'Guten Abend';
+  $('#greeting').textContent = `${hello}, ${me.displayName.split(' ')[0]}`;
   if (KIOSK) {
-    $('#kiosk-hello').textContent = `Hallo ${me.displayName.split(' ')[0]}!`;
+    $('#kiosk-hello').textContent = `${hello}, ${me.displayName.split(' ')[0]}`;
     show('kiosk');
+    kioskActivity();
   } else {
     show('app');
   }
   connectWS();
+}
+
+// Forced setup screen
+$('#setup2fa-start').addEventListener('click', () => setup2FA(true));
+$('#setup2fa-logout').addEventListener('click', logout);
+
+async function setup2FA(forced = false) {
+  let data;
+  try { data = await api('POST', '/api/totp/setup'); } catch (e) { toast(e.message, true); return; }
+  const code = el('input', { class: 'code', inputmode: 'numeric', maxlength: 7, autocomplete: 'one-time-code', placeholder: '000000', required: true });
+  const res = await dialog({
+    title: 'Zwei-Faktor-Anmeldung',
+    body: [
+      el('ol', { class: 'steps' },
+        el('li', {}, 'Authenticator-App öffnen (z. B. Microsoft Authenticator, Google Authenticator, Apple Passwörter).'),
+        el('li', {}, 'QR-Code scannen oder den Schlüssel eingeben.'),
+        el('li', {}, 'Den angezeigten 6-stelligen Code hier eintragen.')),
+      el('div', { class: 'qr' }, el('img', { src: data.qr, alt: 'QR-Code für die Authenticator-App', width: 196, height: 196 })),
+      el('p', { class: 'muted small' }, 'Schlüssel: ', el('code', { class: 'wrap' }, data.secret)),
+      field('Bestätigungscode', code),
+    ],
+    okText: 'Aktivieren',
+    cancel: true,
+    onOk: async () => api('POST', '/api/totp/confirm', { code: code.value.replace(/\D/g, '') }),
+  });
+  if (res) {
+    state.me = res;
+    toast('Zwei-Faktor-Anmeldung ist aktiv');
+    if (forced) enterApp();
+    else $('#menu-2fa').textContent = 'Zwei-Faktor-Anmeldung: aktiv';
+  }
+}
+
+function manage2FA() {
+  if (!state.me.totp) { setup2FA(); return; }
+  if (state.me.require2FA) {
+    dialog({ title: 'Zwei-Faktor-Anmeldung', body: el('p', {}, 'Die Zwei-Faktor-Anmeldung ist aktiv und auf diesem Server Pflicht. Bei Verlust des Telefons setzt ein Administrator sie zurück.'), cancel: false });
+    return;
+  }
+  const pw = el('input', { type: 'password', autocomplete: 'current-password', required: true });
+  const code = el('input', { class: 'code', inputmode: 'numeric', maxlength: 7, autocomplete: 'one-time-code', required: true });
+  dialog({
+    title: 'Zwei-Faktor-Anmeldung deaktivieren?',
+    body: [el('p', { class: 'muted' }, 'Dein Konto ist dann nur noch durch das Passwort geschützt.'), field('Passwort', pw), field('Aktueller Code', code)],
+    okText: 'Deaktivieren', danger: true,
+    onOk: async () => {
+      await api('POST', '/api/totp/disable', { password: pw.value, code: code.value.replace(/\D/g, '') });
+      state.me.totp = false;
+      $('#menu-2fa').textContent = 'Zwei-Faktor-Anmeldung einrichten';
+      toast('Zwei-Faktor-Anmeldung deaktiviert');
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -213,9 +362,14 @@ function connectWS() {
     state.ws = null;
     setConn('bad');
     if (state.session) state.session.signalingLost();
-    // Session expired or revoked?
     try { await api('GET', '/api/me'); } catch (e) {
-      if (e.status === 401) { toast('Abgemeldet – bitte erneut anmelden', true); show('login'); return; }
+      if (e.status === 401) {
+        if (state.session) state.session.close('logout');
+        toast('Abgemeldet – bitte erneut anmelden', true);
+        state.me = null;
+        showLogin();
+        return;
+      }
     }
     const delay = Math.min(1000 * 2 ** state.wsRetry++, 15000);
     setTimeout(() => { if (state.me) connectWS(); }, delay);
@@ -240,12 +394,12 @@ function onSignal(msg) {
       renderKiosk();
       if (state.session) state.session.devicesUpdated();
       break;
+    case 'notice':
+      toast(msg.reason, false, 8000);
+      break;
     case 'error':
-      if (state.session && !state.session.id) {
-        state.session.fail(msg.reason);
-      } else {
-        toast(msg.reason, true);
-      }
+      if (state.session && !state.session.id) state.session.fail(msg.reason);
+      else toast(msg.reason, true);
       break;
     default:
       if (state.session) state.session.onSignal(msg);
@@ -255,14 +409,22 @@ function onSignal(msg) {
 // ---------------------------------------------------------------------------
 // Device list
 
-function deviceStatus(d) {
-  if (!d.online) return el('span', { class: 'status off' }, 'Offline');
-  if (d.inUseBy && d.inUseBy.length) return el('span', { class: 'status busy', title: d.inUseBy.join(', ') }, 'Verwendet: ' + d.inUseBy.join(', '));
-  return el('span', { class: 'status on' }, 'Bereit');
-}
-
 function busyByOthers(d) {
   return (d.inUseBy || []).filter((n) => n !== state.me.displayName);
+}
+
+function deviceStatus(d) {
+  if (d.pending) return el('span', { class: 'chip pending' }, 'Wartet auf Freigabe');
+  if (!d.online) return el('span', { class: 'chip' }, 'Offline');
+  if (d.inUseBy && d.inUseBy.length) return el('span', { class: 'chip busy', title: d.inUseBy.join(', ') }, 'Aktiv: ' + d.inUseBy.join(', '));
+  return el('span', { class: 'chip on' }, 'Bereit');
+}
+
+function encoderLabel(enc) {
+  return {
+    h264_nvenc: 'NVIDIA NVENC', h264_amf: 'AMD AMF', h264_qsv: 'Intel Quick Sync',
+    h264_videotoolbox: 'Apple VideoToolbox', libx264: 'Software', h264_mf: 'Media Foundation', libvpx: 'Software (VP8)',
+  }[enc] || enc || '';
 }
 
 function renderDevices() {
@@ -270,24 +432,26 @@ function renderDevices() {
   const q = ($('#device-search').value || '').toLowerCase();
   const devices = state.devices.filter((d) => !q || d.name.toLowerCase().includes(q));
   $('#no-devices').classList.toggle('hidden', state.devices.length > 0);
-  const online = state.devices.filter((d) => d.online).length;
+  const online = state.devices.filter((d) => d.online && !d.pending).length;
   $('#devices-sub').textContent = state.devices.length
-    ? `${online} von ${state.devices.length} online. Wähle einen Rechner, um dich zu verbinden.`
+    ? `${online} von ${state.devices.length} ${state.devices.length === 1 ? 'Rechner' : 'Rechnern'} online`
     : '';
   list.replaceChildren(...devices.map((d) => {
     const others = busyByOthers(d);
     const actions = el('div', { class: 'device-actions' });
-    if (d.online) {
+    if (d.pending) {
+      if (state.me.admin) actions.append(btn('Freigeben', { cls: 'primary small', icon: 'check', onclick: () => approveDevice(d) }));
+    } else if (d.online) {
       if (others.length && state.me.admin) {
-        actions.append(el('button', { class: 'btn small', title: 'Andere Sitzung beenden und übernehmen', onclick: () => startSession(d, { takeover: true }) }, 'Übernehmen'));
-        actions.append(el('button', { class: 'btn primary small', title: 'Zusätzlich verbinden (Support)', onclick: () => startSession(d) }, 'Zuschauen'));
+        actions.append(btn('Übernehmen', { cls: 'small', title: 'Andere Sitzung beenden und übernehmen', onclick: () => startSession(d, { takeover: true }) }));
+        actions.append(btn('Zuschauen', { cls: 'primary small', icon: 'eye', title: 'Zusätzlich verbinden (Support) – der Benutzer wird informiert', onclick: () => startSession(d) }));
       } else {
-        actions.append(el('button', { class: 'btn primary small', disabled: others.length > 0, onclick: () => startSession(d) }, 'Verbinden'));
+        actions.append(btn('Verbinden', { cls: 'primary small', disabled: others.length > 0, onclick: () => startSession(d) }));
       }
     } else if (d.canWake) {
-      actions.append(el('button', { class: 'btn small', onclick: () => wakeDevice(d) }, '⏻ Einschalten'));
+      actions.append(btn('Einschalten', { cls: 'small', icon: 'power', onclick: () => wakeDevice(d) }));
     }
-    return el('div', { class: 'device ' + (d.online ? 'online' : 'offline') },
+    return el('div', { class: 'device glass ' + (d.online ? 'online' : 'offline') },
       el('div', { class: 'device-head' },
         osIcon(d.os),
         el('div', {},
@@ -297,42 +461,69 @@ function renderDevices() {
   }));
 }
 
-function encoderLabel(enc) {
-  return {
-    h264_nvenc: 'NVIDIA NVENC', h264_amf: 'AMD AMF', h264_qsv: 'Intel Quick Sync',
-    h264_videotoolbox: 'Apple VideoToolbox', libx264: 'Software (x264)', h264_mf: 'Media Foundation',
-  }[enc] || enc;
-}
-
 $('#device-search').addEventListener('input', renderDevices);
 
 async function wakeDevice(d) {
   try {
     await api('POST', `/api/devices/${encodeURIComponent(d.id)}/wake`);
-    toast(`Einschaltsignal an „${d.name}“ gesendet. Das kann bis zu einer Minute dauern.`);
+    toast(`Einschaltsignal an „${d.name}“ gesendet – das dauert bis zu einer Minute.`);
   } catch (e) {
     toast(e.message, true);
   }
 }
 
-// Kiosk: big buttons for the user's machines, auto-connect when only one.
+async function approveDevice(d) {
+  try {
+    await api('PATCH', `/api/admin/devices/${encodeURIComponent(d.id)}`, { approve: true });
+    toast(`„${d.name}“ freigegeben`);
+    if (state.admin) loadAdmin();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Kiosk: lock-screen clock, big buttons, idle logout
+
 let kioskAutoDone = false;
+let kioskIdleTimer;
+
+function kioskActivity() {
+  if (!KIOSK) return;
+  clearTimeout(kioskIdleTimer);
+  kioskIdleTimer = setTimeout(() => {
+    if (state.me && !state.session) { toast('Wegen Inaktivität abgemeldet'); logout(); }
+  }, KIOSK_IDLE_MS);
+}
+if (KIOSK) {
+  ['pointerdown', 'keydown', 'pointermove'].forEach((t) => document.addEventListener(t, () => { if (!state.session) kioskActivity(); }, { passive: true }));
+  const tick = () => {
+    const now = new Date();
+    $('#kiosk-clock').textContent = now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+    $('#kiosk-date').textContent = now.toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long' });
+  };
+  tick();
+  setInterval(tick, 1000);
+}
+
 function renderKiosk() {
   if (!KIOSK) return;
   const box = $('#kiosk-devices');
   const wanted = params.get('device');
-  const devices = wanted ? state.devices.filter((d) => d.id === wanted || d.name === wanted) : state.devices;
+  const devices = (wanted ? state.devices.filter((d) => d.id === wanted || d.name === wanted) : state.devices).filter((d) => !d.pending);
   if (!devices.length) {
     box.replaceChildren(el('p', { class: 'muted' }, 'Dir ist noch kein Rechner zugewiesen.'));
     return;
   }
   box.replaceChildren(...devices.map((d) => {
     const others = busyByOthers(d);
-    let label = 'Verbinden →';
-    if (!d.online) label = d.canWake ? '⏻ Einschalten' : 'Offline';
+    let label = 'Verbinden';
+    if (!d.online) label = d.canWake ? 'Einschalten' : 'Offline';
     else if (others.length) label = 'Verwendet von ' + others.join(', ');
+    const go = el('span', { class: 'go' }, label);
+    if (d.online && !others.length) go.insertAdjacentHTML('beforeend', icon('arrow'));
     return el('button', {
-      class: 'kiosk-device',
+      class: 'kiosk-device glass refract',
       disabled: (!d.online && !d.canWake) || others.length > 0,
       onclick: () => {
         if (!d.online) { wakeDevice(d); return; }
@@ -340,9 +531,9 @@ function renderKiosk() {
         startSession(d);
       },
     }, osIcon(d.os), el('div', { class: 'grow' }, el('div', { class: 'device-name' }, d.name),
-      el('div', { class: 'device-meta' }, OS_NAMES[d.os] || d.os)), el('span', { class: 'go' }, label));
+      el('div', { class: 'device-meta' }, OS_NAMES[d.os] || d.os)), go);
   }));
-  // Reconnect automatically after a session ended unexpectedly.
+  // Connect automatically when the user owns exactly one machine.
   if (!kioskAutoDone && devices.length === 1 && devices[0].online && !busyByOthers(devices[0]).length && params.has('auto')) {
     kioskAutoDone = true;
     startSession(devices[0]);
@@ -352,7 +543,7 @@ function renderKiosk() {
 $('#kiosk-logout').addEventListener('click', logout);
 
 // ---------------------------------------------------------------------------
-// User menu & settings
+// Menu, settings, tabs
 
 const settings = {
   forceRelay: false,
@@ -368,10 +559,12 @@ $('#btn-user').addEventListener('click', (ev) => {
 });
 document.addEventListener('click', () => $('#user-menu').classList.add('hidden'));
 $('#user-menu').addEventListener('click', (ev) => {
-  const action = ev.target.dataset.action;
+  const b = ev.target.closest('button');
+  const action = b && b.dataset.action;
   if (action === 'logout') logout();
   if (action === 'password') changePassword();
   if (action === 'settings') openSettings();
+  if (action === '2fa') manage2FA();
 });
 
 function changePassword() {
@@ -399,7 +592,8 @@ function openSettings() {
       check('Leistungsanzeige in der Sitzung', stats),
       check('Immer über das Server-Relay verbinden (nur nötig, wenn direkte Verbindungen blockiert sind – erhöht die Latenz)', relay),
     ],
-    okText: 'Speichern',
+    okText: 'Fertig',
+    cancel: false,
     onOk: () => {
       settings.forceRelay = relay.checked;
       settings.showStats = stats.checked;
@@ -408,11 +602,21 @@ function openSettings() {
   });
 }
 
-// Tabs
+function moveSegThumb() {
+  const active = $('#tabs button.active');
+  const thumb = $('#seg-thumb');
+  if (!active || !thumb || !active.offsetWidth) return;
+  thumb.style.width = active.offsetWidth + 'px';
+  thumb.style.transform = `translateX(${active.offsetLeft}px)`;
+}
+window.addEventListener('resize', moveSegThumb);
+
 $('#tabs').addEventListener('click', (ev) => {
-  const tab = ev.target.dataset && ev.target.dataset.tab;
+  const b = ev.target.closest('button');
+  const tab = b && b.dataset.tab;
   if (!tab) return;
-  $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
+  $$('#tabs button').forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
+  moveSegThumb();
   $('#tab-devices').classList.toggle('hidden', tab !== 'devices');
   $('#tab-admin-panel').classList.toggle('hidden', tab !== 'admin');
   if (tab === 'admin') loadAdmin();
@@ -433,7 +637,7 @@ async function loadAdmin() {
   renderAdmin();
   loadAudit();
   adminTimer = setInterval(async () => {
-    if ($('#tab-admin-panel').classList.contains('hidden') || $('#dlg').open) return;
+    if ($('#tab-admin-panel').classList.contains('hidden') || $('#dlg').open || !state.me) return;
     try { state.admin = await api('GET', '/api/admin/overview'); renderAdmin(); } catch { /* ignore */ }
   }, 5000);
 }
@@ -449,47 +653,54 @@ function renderAdmin() {
   const a = state.admin;
   const devName = Object.fromEntries(a.devices.map((d) => [d.id, d.name]));
   const online = a.devices.filter((d) => d.online).length;
+  const pending = a.devices.filter((d) => d.pending).length;
+  const with2fa = a.users.filter((u) => u.totp).length;
 
+  const kpi = (n, label) => el('div', { class: 'kpi glass' }, el('b', {}, n), el('span', {}, label));
   $('#admin-kpis').replaceChildren(
-    el('div', { class: 'kpi' }, el('b', {}, a.sessions.length), el('span', {}, 'aktive Sitzungen')),
-    el('div', { class: 'kpi' }, el('b', {}, `${online}/${a.devices.length}`), el('span', {}, 'Geräte online')),
-    el('div', { class: 'kpi' }, el('b', {}, a.users.length), el('span', {}, 'Benutzer')),
+    kpi(a.sessions.length, 'aktive Sitzungen'),
+    kpi(`${online}/${a.devices.length}`, 'Geräte online'),
+    kpi(`${with2fa}/${a.users.length}`, 'Benutzer mit 2FA'),
+    kpi(pending, 'Geräte warten auf Freigabe'),
   );
 
   table('#tbl-sessions', ['Benutzer', 'Gerät', 'Von', 'Dauer', ''], a.sessions.map((s) => el('tr', {},
     el('td', {}, s.user), el('td', {}, s.device), el('td', { class: 'mono' }, s.ip), el('td', {}, fmtDuration(s.started)),
-    el('td', { class: 'actions' }, el('button', {
-      class: 'btn danger small',
+    el('td', { class: 'actions' }, btn('Beenden', {
+      cls: 'danger small',
       onclick: async () => {
         try { await api('DELETE', `/api/admin/sessions/${s.id}`); toast('Sitzung beendet'); loadAdmin(); } catch (e) { toast(e.message, true); }
       },
-    }, 'Beenden')))), 'Keine aktiven Sitzungen');
+    })))), 'Keine aktiven Sitzungen');
 
-  table('#tbl-users', ['Name', 'Benutzer', 'Rolle', 'Geräte', 'Letzte Anmeldung', ''], a.users.map((u) => el('tr', {},
-    el('td', {}, u.displayName, u.disabled ? el('span', { class: 'tag red' }, ' deaktiviert') : null),
+  table('#tbl-users', ['Name', 'Benutzer', 'Rolle', '2FA', 'Geräte', 'Letzte Anmeldung', ''], a.users.map((u) => el('tr', {},
+    el('td', {}, u.displayName, ' ', u.disabled ? el('span', { class: 'tag red' }, 'deaktiviert') : null),
     el('td', { class: 'mono' }, u.name),
     el('td', {}, u.admin ? el('span', { class: 'tag accent' }, 'Admin') : el('span', { class: 'tag' }, 'Benutzer')),
+    el('td', {}, u.totp ? el('span', { class: 'tag ok' }, 'aktiv') : el('span', { class: a.require2FA ? 'tag warn' : 'tag' }, 'aus')),
     el('td', {}, u.admin ? 'alle' : (u.devices.map((id) => devName[id]).filter(Boolean).join(', ') || '–')),
     el('td', {}, fmtTime(u.lastLogin)),
     el('td', { class: 'actions' },
-      el('button', { class: 'btn small', onclick: () => editUser(u) }, 'Bearbeiten'),
-      el('button', { class: 'btn danger small', onclick: () => deleteUser(u) }, 'Löschen')))), 'Keine Benutzer');
+      btn('Bearbeiten', { cls: 'small', onclick: () => editUser(u) }),
+      btn('Löschen', { cls: 'danger small', onclick: () => deleteUser(u) })))), 'Keine Benutzer');
 
   table('#tbl-devices', ['Gerät', 'System', 'Aufnahme', 'IP', 'Zuletzt', ''], a.devices.map((d) => el('tr', {},
-    el('td', {}, el('span', { class: 'status ' + (d.online ? 'on' : 'off') }, d.name)),
+    el('td', {}, el('span', { class: 'chip ' + (d.pending ? 'pending' : d.online ? 'on' : '') }, d.name)),
     el('td', {}, `${OS_NAMES[d.os] || d.os} ${d.arch || ''}`, d.info && d.info.version ? el('div', { class: 'muted small' }, 'Agent ' + d.info.version) : null),
     el('td', {}, d.info ? `${encoderLabel(d.info.encoder)}${d.info.capture ? ' · ' + d.info.capture : ''}${d.info.audio ? ' · Ton' : ''}` : '–',
       d.info && d.info.desktop && d.info.desktop !== 'Default' ? el('div', { class: 'muted small' }, 'Desktop: ' + d.info.desktop) : null),
     el('td', { class: 'mono' }, d.lastIp || '–'),
     el('td', {}, d.online ? 'jetzt' : fmtTime(d.lastSeen)),
     el('td', { class: 'actions' },
-      el('button', { class: 'btn small', onclick: () => renameDevice(d) }, 'Umbenennen'),
-      el('button', { class: 'btn danger small', onclick: () => deleteDevice(d) }, 'Entfernen')))), 'Noch keine Geräte registriert');
+      d.pending ? btn('Freigeben', { cls: 'primary small', icon: 'check', onclick: () => approveDevice(d) }) : null,
+      btn('Umbenennen', { cls: 'small', onclick: () => renameDevice(d) }),
+      btn('Entfernen', { cls: 'danger small', onclick: () => deleteDevice(d) })))), 'Noch keine Geräte registriert');
 
   $('#kiosk-cmd').textContent = `chromium --kiosk --noerrdialogs --disable-session-crashed-bubble "${location.origin}/?kiosk&auto"`;
   $('#ca-fp').textContent = a.caFingerprint || '(eigenes Zertifikat)';
   $('#ca-link').classList.toggle('hidden', !a.caFingerprint);
 }
+$('#copy-kiosk').addEventListener('click', () => copyText($('#kiosk-cmd').textContent));
 
 async function loadAudit() {
   try {
@@ -498,13 +709,15 @@ async function loadAudit() {
       'login': 'Anmeldung', 'login.failed': 'Fehlgeschlagene Anmeldung', 'session.start': 'Sitzung gestartet',
       'session.end': 'Sitzung beendet', 'session.denied': 'Zugriff verweigert', 'agent.enrolled': 'Gerät registriert',
       'agent.enroll_failed': 'Registrierung abgelehnt', 'agent.auth_failed': 'Gerät abgewiesen', 'device.wake': 'Wake-on-LAN',
-      'device.renamed': 'Gerät umbenannt', 'device.revoked': 'Gerät entfernt', 'user.created': 'Benutzer angelegt',
-      'user.updated': 'Benutzer geändert', 'user.deleted': 'Benutzer gelöscht', 'user.password_changed': 'Passwort geändert',
+      'device.renamed': 'Gerät umbenannt', 'device.revoked': 'Gerät entfernt', 'device.approved': 'Gerät freigegeben',
+      'user.created': 'Benutzer angelegt', 'user.updated': 'Benutzer geändert', 'user.deleted': 'Benutzer gelöscht',
+      'user.password_changed': 'Passwort geändert', 'user.2fa_enabled': '2FA aktiviert', 'user.2fa_disabled': '2FA deaktiviert',
       'enroll_key.rotated': 'Registrierungsschlüssel erneuert',
     };
+    const bad = (ev) => /fail|denied/.test(ev);
     table('#tbl-audit', ['Zeit', 'Ereignis', 'Benutzer', 'Gerät', 'IP', 'Details'], (entries || []).map((e) => el('tr', {},
       el('td', { class: 'small nowrap' }, new Date(e.time).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'medium' })),
-      el('td', {}, e.event.includes('fail') || e.event.includes('denied') ? el('span', { class: 'tag red' }, labels[e.event] || e.event) : (labels[e.event] || e.event)),
+      el('td', {}, bad(e.event) ? el('span', { class: 'tag red' }, labels[e.event] || e.event) : (labels[e.event] || e.event)),
       el('td', {}, e.user || ''), el('td', {}, e.device || ''), el('td', { class: 'mono' }, e.ip || ''),
       el('td', { class: 'muted small' }, e.detail || ''))), 'Keine Einträge');
   } catch (e) {
@@ -515,23 +728,23 @@ $('#btn-reload-audit').addEventListener('click', loadAudit);
 
 function deviceChecks(selected) {
   const box = el('div', { class: 'device-checks' });
-  const inputs = state.admin.devices.map((d) => {
+  const inputs = state.admin.devices.filter((d) => !d.pending).map((d) => {
     const cb = el('input', { type: 'checkbox', value: d.id, checked: selected.includes(d.id) });
     box.append(check(`${d.name} (${OS_NAMES[d.os] || d.os})`, cb));
     return cb;
   });
-  if (!inputs.length) box.append(el('p', { class: 'muted small' }, 'Noch keine Geräte registriert.'));
+  if (!inputs.length) box.append(el('p', { class: 'muted small' }, 'Noch keine freigegebenen Geräte.'));
   return { box, values: () => inputs.filter((i) => i.checked).map((i) => i.value) };
 }
 
 function genPassword() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
-  const a = crypto.getRandomValues(new Uint32Array(14));
+  const a = crypto.getRandomValues(new Uint32Array(16));
   return Array.from(a, (n) => chars[n % chars.length]).join('');
 }
 
 $('#btn-add-user').addEventListener('click', () => {
-  const name = el('input', { required: true, pattern: '[a-zA-Z0-9][a-zA-Z0-9._-]*', placeholder: 'max.mustermann', autocomplete: 'off' });
+  const name = el('input', { required: true, pattern: '[a-zA-Z0-9][a-zA-Z0-9._\\-]*', placeholder: 'max.mustermann', autocomplete: 'off', autocapitalize: 'none' });
   const display = el('input', { placeholder: 'Max Mustermann', autocomplete: 'off' });
   const pw = el('input', { required: true, minlength: 10, value: genPassword(), autocomplete: 'new-password' });
   const admin = el('input', { type: 'checkbox' });
@@ -554,16 +767,23 @@ function editUser(u) {
   const pw = el('input', { placeholder: 'leer lassen = unverändert', minlength: 10, autocomplete: 'new-password' });
   const admin = el('input', { type: 'checkbox', checked: u.admin });
   const disabled = el('input', { type: 'checkbox', checked: !!u.disabled });
+  const reset = el('input', { type: 'checkbox' });
   const devs = deviceChecks(u.devices);
   dialog({
-    title: `Benutzer „${u.name}“`,
-    body: [field('Anzeigename', display), field('Neues Passwort', pw), check('Administrator', admin), check('Deaktiviert', disabled), field('Erlaubte Geräte', devs.box)],
-    okText: 'Speichern',
+    title: u.displayName,
+    body: [
+      field('Anzeigename', display), field('Neues Passwort', pw),
+      check('Administrator', admin), check('Deaktiviert', disabled),
+      u.totp ? check('Zwei-Faktor-Anmeldung zurücksetzen (Telefon verloren)', reset) : null,
+      field('Erlaubte Geräte', devs.box),
+    ],
+    okText: 'Sichern',
     onOk: async () => {
       const patch = { displayName: display.value, devices: devs.values() };
       if (pw.value) patch.password = pw.value;
       if (admin.checked !== u.admin) patch.admin = admin.checked;
       if (disabled.checked !== !!u.disabled) patch.disabled = disabled.checked;
+      if (reset.checked) patch.resetTotp = true;
       await api('PATCH', `/api/admin/users/${encodeURIComponent(u.name)}`, patch);
       toast('Gespeichert');
       loadAdmin();
@@ -583,7 +803,7 @@ function deleteUser(u) {
 function renameDevice(d) {
   const name = el('input', { value: d.name, required: true, maxlength: 64 });
   dialog({
-    title: 'Gerät umbenennen', body: field('Name', name), okText: 'Speichern',
+    title: 'Gerät umbenennen', body: field('Name', name), okText: 'Sichern',
     onOk: async () => { await api('PATCH', `/api/admin/devices/${d.id}`, { name: name.value }); loadAdmin(); },
   });
 }
@@ -603,16 +823,16 @@ $('#btn-add-device').addEventListener('click', () => {
   const origin = location.origin;
   const win = `[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; irm "${origin}/install/agent.ps1?key=${key}" | iex`;
   const unix = `curl -kfsSL "${origin}/install/agent.sh?key=${key}" | sh`;
-  const cmd = (id, text) => el('div', { class: 'cmd' }, el('code', { id }, text),
-    el('button', { type: 'button', class: 'btn copy', onclick: () => copyText(text) }, 'Kopieren'));
+  const cmd = (text) => el('div', { class: 'cmd' }, el('code', {}, text), btn('Kopieren', { cls: 'small', onclick: () => copyText(text) }));
   const missing = ['windows', 'darwin', 'linux'].filter((os) => !a.agents.some((b) => b.os === os));
   dialog({
     title: 'Gerät hinzufügen',
     body: [
-      el('p', { class: 'muted small' }, 'Auf dem Rechner, der ferngesteuert werden soll, einmal ausführen. Das Skript prüft die Prüfsumme des Agents und pinnt das Server-Zertifikat.'),
-      el('h3', {}, 'Windows'), el('p', { class: 'muted small' }, 'PowerShell „Als Administrator ausführen“ – installiert den Dienst (funktioniert auch am Sperr- und Anmeldebildschirm).'),
-      cmd('cmd-win', win),
-      el('h3', {}, 'macOS / Linux'), cmd('cmd-unix', unix),
+      el('p', { class: 'muted small' }, 'Auf dem Rechner, der ferngesteuert werden soll, einmal ausführen. Das Skript prüft die Prüfsumme des Agents und pinnt das Server-Zertifikat. Neue Geräte erscheinen danach hier und müssen freigegeben werden.'),
+      el('h3', {}, 'Windows'),
+      el('p', { class: 'muted small' }, 'PowerShell „Als Administrator ausführen“ – installiert den Dienst (funktioniert auch am Sperr- und Anmeldebildschirm).'),
+      cmd(win),
+      el('h3', {}, 'macOS / Linux'), cmd(unix),
       missing.length ? el('p', { class: 'hint' }, `Hinweis: Für ${missing.map((m) => OS_NAMES[m]).join(', ')} liegt kein Agent auf dem Server.`) : null,
       el('p', { class: 'muted small' }, 'Registrierungsschlüssel: ', el('code', {}, key)),
     ],
@@ -634,14 +854,15 @@ const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function enterFullscreen() {
   const s = $('#view-session');
   if (!document.fullscreenElement && s.requestFullscreen) {
-    // Must be called synchronously within the click handler.
-    $('#view-session').classList.remove('hidden');
+    // Must run synchronously inside the click handler.
+    s.classList.remove('hidden');
     s.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
   }
 }
 
 function startSession(device, opts = {}) {
   if (state.session) state.session.close('switch');
+  clearTimeout(kioskIdleTimer);
   state.session = new Session(device, opts);
 }
 
@@ -665,6 +886,7 @@ class Session {
     this.lastClip = null;
     this.pingRTT = null;
     this.prevStats = null;
+    this.frameLatency = [];
     this.swapMeta = settings.swapMeta ?? (isMac !== (device.os === 'darwin'));
 
     show('session');
@@ -683,8 +905,8 @@ class Session {
 
   request() {
     this.id = null;
-    const codecs = [...new Set(((RTCRtpReceiver.getCapabilities && RTCRtpReceiver.getCapabilities('video')) || { codecs: [] })
-      .codecs.map((c) => c.mimeType))];
+    const caps = (RTCRtpReceiver.getCapabilities && RTCRtpReceiver.getCapabilities('video')) || { codecs: [] };
+    const codecs = [...new Set(caps.codecs.map((c) => c.mimeType))];
     sendSignal({ type: 'connect', target: this.device.id, forceRelay: settings.forceRelay, takeover: !!this.opts.takeover, codecs });
     this.opts.takeover = false;
   }
@@ -700,8 +922,8 @@ class Session {
   }
 
   signalingLost() {
-    // The media path is independent of the server; keep the session if
-    // it is up, otherwise retry once the WebSocket is back.
+    // Media flows peer-to-peer; keep a running session even if the server
+    // connection blips, otherwise retry once it is back.
     if (!this.pc || this.pc.connectionState !== 'connected') this.scheduleRetry('Verbindung zum Server verloren');
   }
 
@@ -721,29 +943,26 @@ class Session {
         else this.pendingCandidates.push(msg.candidate);
         break;
       case 'end':
-        if (msg.session !== this.id) return;
-        this.ended(msg.reason);
+        if (msg.session === this.id) this.ended(msg.reason);
         break;
     }
   }
 
   createPC(iceServers) {
-    const pc = new RTCPeerConnection({
-      iceServers,
-      iceTransportPolicy: settings.forceRelay ? 'relay' : 'all',
-    });
+    const pc = new RTCPeerConnection({ iceServers, iceTransportPolicy: settings.forceRelay ? 'relay' : 'all' });
     this.pc = pc;
     pc.onicecandidate = (ev) => {
       if (ev.candidate) sendSignal({ type: 'candidate', session: this.id, candidate: ev.candidate.toJSON() });
     };
     pc.ontrack = (ev) => {
-      // Render every frame immediately: no extra jitter buffering on a LAN.
+      // Render every frame immediately: no jitter buffering on a LAN.
       try { ev.receiver.jitterBufferTarget = 0; } catch { /* unsupported */ }
       try { ev.receiver.playoutDelayHint = 0; } catch { /* unsupported */ }
       const v = $('#video');
       if (!v.srcObject) v.srcObject = new MediaStream();
       v.srcObject.addTrack(ev.track);
       if (ev.track.kind === 'audio') this.tryUnmute();
+      if (ev.track.kind === 'video') this.watchFrames();
       v.play().catch(() => {});
     };
     pc.ondatachannel = (ev) => {
@@ -785,7 +1004,7 @@ class Session {
 
   ended(reason) {
     if (this.closed) return;
-    const permanent = /übernommen|Administrator|anderen Arbeitsplatz|Berechtigung|wrong|revoked/i.test(reason || '');
+    const permanent = /übernommen|Administrator|anderen Arbeitsplatz|Berechtigung|Freigabe|revoked/i.test(reason || '');
     if (permanent || this.userClosed) {
       toast(reason || 'Sitzung beendet', !this.userClosed);
       this.close('ended');
@@ -819,8 +1038,7 @@ class Session {
     this.pc = null;
     this.control = null;
     this.motion = null;
-    const v = $('#video');
-    v.srcObject = null;
+    $('#video').srcObject = null;
     $('#tb-dot').classList.remove('ok');
   }
 
@@ -834,8 +1052,33 @@ class Session {
     if (document.pointerLockElement) document.exitPointerLock();
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     state.session = null;
+    if (why === 'logout') return;
     show(KIOSK ? 'kiosk' : 'app');
     renderKiosk();
+    kioskActivity();
+  }
+
+  // ---- measured display latency (per frame, from the browser itself)
+
+  watchFrames() {
+    const v = $('#video');
+    if (!v.requestVideoFrameCallback) return;
+    const onFrame = (now, meta) => {
+      if (this.closed || !this.pc) return;
+      // receiveTime: last packet of the frame arrived; expectedDisplayTime:
+      // when the compositor shows it. The difference is decode + render.
+      if (meta.receiveTime && meta.expectedDisplayTime) {
+        const d = meta.expectedDisplayTime - meta.receiveTime;
+        // Some engines report receiveTime in another timebase: keep only
+        // physically plausible samples.
+        if (d >= 0 && d < 500) {
+          this.frameLatency.push(d);
+          if (this.frameLatency.length > 120) this.frameLatency.shift();
+        }
+      }
+      v.requestVideoFrameCallback(onFrame);
+    };
+    v.requestVideoFrameCallback(onFrame);
   }
 
   // ---- control channel (agent -> viewer)
@@ -871,17 +1114,16 @@ class Session {
 
   showDesktop(name) {
     const b = $('#tb-desktop');
-    const label = { Winlogon: 'Sperr-/Anmeldebildschirm', 'Screen-saver': 'Bildschirmschoner' }[name];
-    b.textContent = label || name || '';
+    const label = { Winlogon: 'Sperrbildschirm', 'Screen-saver': 'Bildschirmschoner' }[name];
+    b.textContent = label || '';
     b.classList.toggle('hidden', !label);
   }
 
   applyCursor(shape) {
-    const v = $('#video');
     if (this.pointerLocked) return;
-    // With a locally drawn cursor the pointer moves without any latency;
-    // otherwise the cursor is part of the video and the local one hidden.
-    v.style.cursor = this.cursorMode === 'local' ? (shape || 'default') : 'none';
+    // A locally drawn cursor moves with zero latency; otherwise the cursor
+    // is part of the video and the local one is hidden.
+    $('#video').style.cursor = this.cursorMode === 'local' ? (shape || 'default') : 'none';
   }
 
   // ---- audio
@@ -898,7 +1140,8 @@ class Session {
   }
 
   updateAudioBtn() {
-    $('#btn-audio').textContent = $('#video').muted ? '🔇' : '🔊';
+    const b = $('#btn-audio');
+    b.innerHTML = icon($('#video').muted ? 'mute' : 'speaker');
   }
 
   // ---- input (viewer -> agent)
@@ -910,7 +1153,7 @@ class Session {
 
   videoPoint(ev) {
     const v = $('#video');
-    const r = v.getBoundingClientRect();
+    const r = this.rect || (this.rect = v.getBoundingClientRect());
     const vw = v.videoWidth || r.width, vh = v.videoHeight || r.height;
     const scale = Math.min(r.width / vw, r.height / vh);
     const w = vw * scale, h = vh * scale;
@@ -924,7 +1167,7 @@ class Session {
   }
 
   async syncClipboard() {
-    if (!this.info.clipboard && this.info.t) return;
+    if (this.info.t && !this.info.clipboard) return;
     if (!navigator.clipboard || !navigator.clipboard.readText || !document.hasFocus()) return;
     try {
       const text = await navigator.clipboard.readText();
@@ -939,29 +1182,30 @@ class Session {
     const v = $('#video');
     const h = this.handlers = {};
 
-    h.pointermove = (ev) => {
+    // pointerrawupdate fires for every hardware mouse report instead of
+    // once per animation frame: the remote cursor follows up to one frame
+    // (8–16 ms) sooner. Falls back to pointermove where unsupported.
+    const moveEvent = 'onpointerrawupdate' in window ? 'pointerrawupdate' : 'pointermove';
+    h.move = (ev) => {
       if (this.pointerLocked) {
-        this.send({ t: 'r', dx: ev.movementX, dy: ev.movementY }, false);
+        if (ev.movementX || ev.movementY) this.send({ t: 'r', dx: ev.movementX, dy: ev.movementY }, false);
         return;
       }
-      const events = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [];
-      const last = events.length ? events[events.length - 1] : ev;
-      const p = this.videoPoint(last);
+      const p = this.videoPoint(ev);
       if (p.x < 0 || p.x > 1 || p.y < 0 || p.y > 1) return;
       this.send({ t: 'm', x: +p.x.toFixed(5), y: +p.y.toFixed(5) }, false);
     };
     h.pointerdown = (ev) => {
       ev.preventDefault();
       v.focus();
-      if (ev.pointerType === 'mouse' || ev.pointerType === 'pen' || ev.pointerType === 'touch') {
-        if (!this.pointerLocked) {
-          const p = this.videoPoint(ev);
-          // Position travels on the reliable channel right before the click.
-          this.send({ t: 'm', x: p.x, y: p.y });
-        }
-        v.setPointerCapture(ev.pointerId);
-        this.send({ t: 'b', b: ev.button < 0 ? 0 : ev.button, d: true });
+      if (!this.pointerLocked) {
+        const p = this.videoPoint(ev);
+        // The position goes over the reliable channel right before the
+        // click, so a lost motion packet can never misplace a click.
+        this.send({ t: 'm', x: p.x, y: p.y });
       }
+      v.setPointerCapture(ev.pointerId);
+      this.send({ t: 'b', b: ev.button < 0 ? 0 : ev.button, d: true });
     };
     h.pointerup = (ev) => {
       ev.preventDefault();
@@ -983,6 +1227,7 @@ class Session {
       }
     };
     h.contextmenu = (ev) => ev.preventDefault();
+    h.resize = () => { this.rect = null; };
 
     h.keydown = (ev) => {
       if (!this.capturingKeys(ev)) return;
@@ -995,8 +1240,8 @@ class Session {
       ev.preventDefault();
       if (ev.repeat && /^(Shift|Control|Alt|Meta)/.test(ev.code)) return;
       const code = this.mapCode(ev.code);
-      // Paste: push the local clipboard first, then the key.
       if (ev.code === 'KeyV' && (ev.ctrlKey || ev.metaKey) && this.info.clipboard) {
+        // Paste: push the local clipboard first, then the key.
         this.keyChain = this.keyChain.then(() => this.syncClipboard()).then(() => this.send({ t: 'k', c: code, d: true }));
       } else {
         this.keyChain = this.keyChain.then(() => this.send({ t: 'k', c: code, d: true }));
@@ -1018,6 +1263,7 @@ class Session {
       if (!this.pointerLocked) this.applyCursor('default');
     };
     h.fullscreenchange = () => {
+      this.rect = null;
       const fs = !!document.fullscreenElement;
       $('#btn-fullscreen').classList.toggle('active', fs);
       // In fullscreen the browser lets us capture system shortcuts
@@ -1028,12 +1274,14 @@ class Session {
     h.hot = () => this.showToolbar();
     h.toolbarLeave = () => this.hideToolbarSoon();
     h.toolbarEnter = () => clearTimeout(this.toolbarTimer);
+    h.moveEvent = moveEvent;
 
-    v.addEventListener('pointermove', h.pointermove);
+    v.addEventListener(moveEvent, h.move);
     v.addEventListener('pointerdown', h.pointerdown);
     v.addEventListener('pointerup', h.pointerup);
     v.addEventListener('wheel', h.wheel, { passive: false });
     v.addEventListener('contextmenu', h.contextmenu);
+    window.addEventListener('resize', h.resize);
     window.addEventListener('keydown', h.keydown, true);
     window.addEventListener('keyup', h.keyup, true);
     window.addEventListener('blur', h.blur);
@@ -1050,7 +1298,10 @@ class Session {
       if (document.fullscreenElement) document.exitFullscreen();
       else $('#view-session').requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
     };
-    $('#btn-pointer').onclick = () => v.requestPointerLock({ unadjustedMovement: true }).catch(() => v.requestPointerLock());
+    $('#btn-pointer').onclick = () => {
+      const r = v.requestPointerLock({ unadjustedMovement: true });
+      if (r && r.catch) r.catch(() => v.requestPointerLock());
+    };
     $('#btn-cad').onclick = () => this.send({ t: 'sas' });
     $('#btn-stats').onclick = () => $('#stats-detail').classList.toggle('hidden');
     $('#btn-audio').onclick = () => { v.muted = !v.muted; this.updateAudioBtn(); };
@@ -1067,11 +1318,12 @@ class Session {
   unbindUI() {
     const v = $('#video');
     const h = this.handlers;
-    v.removeEventListener('pointermove', h.pointermove);
+    v.removeEventListener(h.moveEvent, h.move);
     v.removeEventListener('pointerdown', h.pointerdown);
     v.removeEventListener('pointerup', h.pointerup);
     v.removeEventListener('wheel', h.wheel);
     v.removeEventListener('contextmenu', h.contextmenu);
+    window.removeEventListener('resize', h.resize);
     window.removeEventListener('keydown', h.keydown, true);
     window.removeEventListener('keyup', h.keyup, true);
     window.removeEventListener('blur', h.blur);
@@ -1146,34 +1398,38 @@ class Session {
     const dt = (this.prevStats.at - prev.at) / 1000;
     const mbit = ((video.bytesReceived - prev.bytesReceived) * 8) / dt / 1e6;
     const frames = video.framesDecoded - prev.framesDecoded;
-    const fps = video.framesPerSecond ?? frames / dt;
+    const fps = frames / dt;
     const decodeMs = frames > 0 ? ((video.totalDecodeTime - prev.totalDecodeTime) / frames) * 1000 : 0;
     const jbCount = video.jitterBufferEmittedCount - prev.jitterBufferEmittedCount;
     const bufferMs = jbCount > 0 ? ((video.jitterBufferDelay - prev.jitterBufferDelay) / jbCount) * 1000 : 0;
     const rttMs = pair && pair.currentRoundTripTime !== undefined ? pair.currentRoundTripTime * 1000 : null;
     const lost = video.packetsLost - prev.packetsLost;
     const relayed = (local && local.candidateType === 'relay') || (remote && remote.candidateType === 'relay');
-    // Network one-way + jitter buffer + decode + ~1 frame capture/encode.
-    const est = (rttMs ?? 1) / 2 + bufferMs + decodeMs + (fps > 0 ? 1000 / fps : 16);
-    const cls = est < 25 ? 'good' : est < 50 ? 'mid' : 'bad';
+    const fl = this.frameLatency.slice().sort((a, b) => a - b);
+    const displayMs = fl.length >= 10 ? fl[Math.floor(fl.length / 2)] : null; // median receive→display
+    // One-way network + (measured receive→display, else buffer+decode) +
+    // ~1 capture interval on the remote machine.
+    const capture = 1000 / (this.info.fps || 60) / 2;
+    const est = (rttMs ?? 1) / 2 + (displayMs ?? bufferMs + decodeMs) + capture + 1;
+    const cls = est < 20 ? 'good' : est < 40 ? 'mid' : 'bad';
 
-    const s = $('#stats');
-    s.replaceChildren(
-      el('span', { class: cls }, `≈${est.toFixed(0)} ms`),
-      ` · ${relayed ? 'Relay' : 'Direkt'} · ${fps.toFixed(0)} fps · ${mbit.toFixed(1)} Mbit/s`,
+    $('#stats').replaceChildren(
+      el('span', { class: cls }, `${est.toFixed(0)} ms`),
+      ` · ${relayed ? 'Relay' : 'Direkt'} · ${fps.toFixed(0)} fps`,
     );
     $('#stats-detail').textContent = [
-      `Verbindung    ${relayed ? 'über Server-Relay (TURN)' : 'direkt (Peer-to-Peer)'}`,
-      `Netzwerk-RTT  ${rttMs !== null ? rttMs.toFixed(1) + ' ms' : '–'}`,
-      `Eingabe-RTT   ${this.pingRTT !== null ? this.pingRTT.toFixed(1) + ' ms' : '–'}`,
-      `Jitter-Puffer ${bufferMs.toFixed(1)} ms`,
-      `Dekodierung   ${decodeMs.toFixed(1)} ms (${video.decoderImplementation || '?'}${video.powerEfficientDecoder ? ', Hardware' : ''})`,
-      `Bildrate      ${fps.toFixed(0)} fps`,
-      `Datenrate     ${mbit.toFixed(1)} Mbit/s`,
-      `Auflösung     ${video.frameWidth || '?'}×${video.frameHeight || '?'}`,
-      `Paketverlust  ${lost}`,
-      `Encoder       ${encoderLabel(this.info.encoder || '')} (${this.info.capture || '?'})`,
-      `Geschätzte Latenz ≈ ${est.toFixed(0)} ms (ohne Bildschirm-Eingabeverzögerung)`,
+      `Verbindung        ${relayed ? 'über Server-Relay (TURN)' : 'direkt (Peer-to-Peer)'}`,
+      `Netzwerk-RTT      ${rttMs !== null ? rttMs.toFixed(1) + ' ms' : '–'}`,
+      `Eingabe-RTT       ${this.pingRTT !== null ? this.pingRTT.toFixed(1) + ' ms' : '–'}`,
+      `Jitter-Puffer     ${bufferMs.toFixed(1)} ms`,
+      `Dekodierung       ${decodeMs.toFixed(1)} ms${video.powerEfficientDecoder ? ' (Hardware)' : ''}`,
+      `Empfang→Anzeige   ${displayMs !== null ? displayMs.toFixed(1) + ' ms (gemessen)' : '–'}`,
+      `Bildrate          ${fps.toFixed(0)} fps (Aufnahme ${this.info.fps || '?'} fps)`,
+      `Datenrate         ${mbit.toFixed(1)} Mbit/s`,
+      `Auflösung         ${video.frameWidth || '?'}×${video.frameHeight || '?'}`,
+      `Paketverlust      ${lost}`,
+      `Encoder           ${encoderLabel(this.info.encoder || '')} · ${this.info.capture || '?'}`,
+      `Latenz (geschätzt) ≈ ${est.toFixed(0)} ms`,
     ].join('\n');
   }
 }

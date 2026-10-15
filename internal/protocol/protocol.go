@@ -17,6 +17,7 @@ const (
 	TypeWelcome = "welcome" // reply to hello (includes ICE servers)
 	TypeDevices = "devices" // device list (viewers only)
 	TypeError   = "error"
+	TypeNotice  = "notice" // informational message for the viewer
 
 	// viewer -> server -> agent
 	TypeConnect = "connect" // viewer asks to open a session to an agent
@@ -61,6 +62,8 @@ type Device struct {
 	// InUseBy lists display names of users currently connected.
 	InUseBy []string `json:"inUseBy,omitempty"`
 	CanWake bool     `json:"canWake,omitempty"`
+	// Pending devices await admin approval and cannot be used yet.
+	Pending bool `json:"pending,omitempty"`
 }
 
 // Message is the single envelope used for all signaling traffic. Only the

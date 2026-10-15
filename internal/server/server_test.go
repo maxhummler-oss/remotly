@@ -29,10 +29,10 @@ func TestStoreUsersAndDevices(t *testing.T) {
 		t.Fatal("last admin deleted")
 	}
 
-	if _, _, err := s.Enroll("bad", "pc", "pc", "windows", "amd64", ""); err == nil {
+	if _, _, err := s.Enroll("bad", "pc", "pc", "windows", "amd64", "", false); err == nil {
 		t.Fatal("bad enrollment key accepted")
 	}
-	id, secret, err := s.Enroll(s.EnrollKey(), "PC 1", "pc1", "windows", "amd64", "10.0.0.5")
+	id, secret, err := s.Enroll(s.EnrollKey(), "PC 1", "pc1", "windows", "amd64", "10.0.0.5", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,5 +116,26 @@ func TestPKI(t *testing.T) {
 	}
 	if len(p.certificate.Certificate) != 2 {
 		t.Fatal("chain does not include the CA")
+	}
+}
+
+func TestTOTP(t *testing.T) {
+	secret := newTOTPSecret()
+	key, _ := b32.DecodeString(secret)
+	now := time.Now()
+	code := totpCode(key, now.Unix()/totpStep)
+	if _, ok := verifyTOTP(secret, code, now); !ok {
+		t.Fatal("current code rejected")
+	}
+	if _, ok := verifyTOTP(secret, code, now.Add(5*time.Minute)); ok {
+		t.Fatal("old code accepted")
+	}
+	g := newTOTPGuard()
+	if !g.check("u", secret, code) || g.check("u", secret, code) {
+		t.Fatal("replay protection broken")
+	}
+	// RFC 6238 test vector (SHA-1, T=59s -> 94287082, 6 digits: 287082).
+	if got := totpCode([]byte("12345678901234567890"), 59/30); got != "287082" {
+		t.Fatalf("RFC vector: got %s", got)
 	}
 }

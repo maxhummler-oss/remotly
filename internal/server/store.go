@@ -28,22 +28,26 @@ type User struct {
 	Admin        bool      `json:"admin"`
 	Disabled     bool      `json:"disabled,omitempty"`
 	Devices      []string  `json:"devices"` // device IDs this user may control
+	TOTPSecret   string    `json:"totpSecret,omitempty"`
 	Created      time.Time `json:"created"`
 	LastLogin    time.Time `json:"lastLogin,omitempty"`
 }
 
 // DeviceRecord is an enrolled agent.
 type DeviceRecord struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Hostname   string    `json:"hostname"`
-	OS         string    `json:"os"`
-	Arch       string    `json:"arch"`
-	SecretHash string    `json:"secretHash"` // sha256 of the agent secret
-	MACs       []string  `json:"macs,omitempty"`
-	LastIP     string    `json:"lastIp,omitempty"`
-	Enrolled   time.Time `json:"enrolled"`
-	LastSeen   time.Time `json:"lastSeen,omitempty"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Hostname   string `json:"hostname"`
+	OS         string `json:"os"`
+	Arch       string `json:"arch"`
+	SecretHash string `json:"secretHash"` // sha256 of the agent secret
+	// Pending devices are connected but unusable until an admin approves
+	// them, so a leaked enrollment key cannot inject rogue machines.
+	Pending  bool      `json:"pending,omitempty"`
+	MACs     []string  `json:"macs,omitempty"`
+	LastIP   string    `json:"lastIp,omitempty"`
+	Enrolled time.Time `json:"enrolled"`
+	LastSeen time.Time `json:"lastSeen,omitempty"`
 }
 
 type state struct {
@@ -272,6 +276,7 @@ type UserPatch struct {
 	Admin       *bool     `json:"admin"`
 	Disabled    *bool     `json:"disabled"`
 	Devices     *[]string `json:"devices"`
+	ResetTOTP   bool      `json:"resetTotp"`
 }
 
 // UpdateUser applies a patch.
@@ -308,6 +313,9 @@ func (s *Store) UpdateUser(name string, p UserPatch) error {
 				return errors.New("der letzte Administrator kann nicht deaktiviert werden")
 			}
 			u.Disabled = *p.Disabled
+		}
+		if p.ResetTOTP {
+			u.TOTPSecret = ""
 		}
 		if p.Devices != nil {
 			ids := []string{}
@@ -373,7 +381,7 @@ func (s *Store) TURNSecret() string {
 
 // Enroll registers a new device if key is valid and returns its ID and
 // secret. The secret is only stored hashed.
-func (s *Store) Enroll(key, name, hostname, osName, arch, ip string) (string, string, error) {
+func (s *Store) Enroll(key, name, hostname, osName, arch, ip string, pending bool) (string, string, error) {
 	if subtle.ConstantTimeCompare([]byte(key), []byte(s.EnrollKey())) != 1 {
 		return "", "", errBadEnrollKey
 	}
@@ -385,7 +393,7 @@ func (s *Store) Enroll(key, name, hostname, osName, arch, ip string) (string, st
 	err := s.update(func(st *state) error {
 		st.Devices[id] = &DeviceRecord{
 			ID: id, Name: name, Hostname: hostname, OS: osName, Arch: arch,
-			SecretHash: hashSecret(secret), LastIP: ip, Enrolled: time.Now(),
+			SecretHash: hashSecret(secret), LastIP: ip, Enrolled: time.Now(), Pending: pending,
 		}
 		return nil
 	})
@@ -443,6 +451,30 @@ func (s *Store) Devices() []DeviceRecord {
 	})
 	sort.Slice(list, func(i, j int) bool { return strings.ToLower(list[i].Name) < strings.ToLower(list[j].Name) })
 	return list
+}
+
+// SetTOTP stores (or clears) a user's TOTP secret.
+func (s *Store) SetTOTP(name, secret string) error {
+	return s.update(func(st *state) error {
+		u := st.Users[name]
+		if u == nil {
+			return errors.New("Benutzer nicht gefunden")
+		}
+		u.TOTPSecret = secret
+		return nil
+	})
+}
+
+// ApproveDevice releases a pending device.
+func (s *Store) ApproveDevice(id string) error {
+	return s.update(func(st *state) error {
+		d := st.Devices[id]
+		if d == nil {
+			return errors.New("Gerät nicht gefunden")
+		}
+		d.Pending = false
+		return nil
+	})
 }
 
 // RenameDevice sets a device's display name.

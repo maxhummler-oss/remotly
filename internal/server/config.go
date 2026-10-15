@@ -42,6 +42,10 @@ type Config struct {
 
 	// SessionHours is how long a web login stays valid.
 	SessionHours int `json:"sessionHours"`
+	// Require2FA forces every user to set up an authenticator app.
+	Require2FA bool `json:"require2fa"`
+	// ApproveDevices: newly enrolled agents must be approved by an admin.
+	ApproveDevices bool `json:"approveDevices"`
 
 	// DataDir holds state.json, audit.log and generated certificates.
 	DataDir string `json:"dataDir"`
@@ -53,16 +57,17 @@ type Config struct {
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		Name:         "Remotly",
-		Listen:       ":443",
-		HTTPRedirect: ":80",
-		TLS:          "auto",
-		TURNPort:     3478,
-		RelayPortMin: 50000,
-		RelayPortMax: 50999,
-		SessionHours: 12,
-		DataDir:      "/var/lib/remotly",
-		AgentsDir:    "/usr/local/share/remotly/agents",
+		Name:           "Remotly",
+		Listen:         ":443",
+		HTTPRedirect:   ":80",
+		TLS:            "auto",
+		TURNPort:       3478,
+		RelayPortMin:   50000,
+		RelayPortMax:   50999,
+		SessionHours:   12,
+		ApproveDevices: true,
+		DataDir:        "/var/lib/remotly",
+		AgentsDir:      "/usr/local/share/remotly/agents",
 	}
 }
 

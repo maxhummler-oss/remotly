@@ -36,6 +36,7 @@ type Server struct {
 	version string
 	store   *Store
 	auth    *auth
+	totp    *totpGuard
 	audit   *Audit
 	pki     *pki
 
@@ -81,6 +82,7 @@ func New(cfg Config, version string, store *Store) *Server {
 		version:  version,
 		store:    store,
 		auth:     newAuth(time.Duration(cfg.SessionHours) * time.Hour),
+		totp:     newTOTPGuard(),
 		audit:    NewAudit(cfg.DataDir + "/audit.log"),
 		agents:   map[string]*client{},
 		viewers:  map[*client]struct{}{},
@@ -121,7 +123,8 @@ func (s *Server) Run(ctx context.Context) error {
 			return fmt.Errorf("TLS: %w", err)
 		}
 		httpSrv.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
+			MinVersion:   tls.VersionTLS12,
+			CipherSuites: strongCiphers,
 			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 				s.mu.Lock()
 				defer s.mu.Unlock()
@@ -131,7 +134,7 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.renewLoop(ctx)
 		scheme = "https"
 	case "files":
-		httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, CipherSuites: strongCiphers}
 		scheme = "https"
 	}
 	if scheme == "https" && s.cfg.HTTPRedirect != "" {
@@ -213,12 +216,25 @@ func (s *Server) redirectHTTPS(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusMovedPermanently)
 }
 
+// strongCiphers limits TLS 1.2 to forward-secret AEAD suites (TLS 1.3
+// suites are always strong and not configurable).
+var strongCiphers = []uint16{
+	tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+	tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+}
+
 func securityHeaders(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hd := w.Header()
 		hd.Set("X-Content-Type-Options", "nosniff")
 		hd.Set("X-Frame-Options", "DENY")
 		hd.Set("Referrer-Policy", "no-referrer")
+		hd.Set("Cross-Origin-Opener-Policy", "same-origin")
+		hd.Set("Cross-Origin-Resource-Policy", "same-origin")
 		hd.Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' wss: ws:; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'")
 		hd.Set("Permissions-Policy", "clipboard-read=(self), clipboard-write=(self), fullscreen=(self), keyboard-map=(self)")
 		if r.TLS != nil {
@@ -262,6 +278,10 @@ func (s *Server) handleViewerWS(w http.ResponseWriter, r *http.Request) {
 	u, ws, ok := s.currentUser(r)
 	if !ok {
 		http.Error(w, "not logged in", http.StatusUnauthorized)
+		return
+	}
+	if s.mustSetup2FA(u) {
+		http.Error(w, "2FA setup required", http.StatusForbidden)
 		return
 	}
 	c := s.newClient(w, r)
@@ -445,7 +465,10 @@ func (s *Server) devicesFor(u User) []protocol.Device {
 		if !u.CanAccess(d.ID) {
 			continue
 		}
-		dev := protocol.Device{ID: d.ID, Name: d.Name, OS: d.OS, InUseBy: users[d.ID]}
+		if d.Pending && !u.Admin {
+			continue
+		}
+		dev := protocol.Device{ID: d.ID, Name: d.Name, OS: d.OS, InUseBy: users[d.ID], Pending: d.Pending}
 		if a := s.agents[d.ID]; a != nil {
 			dev.Online = true
 			dev.Encoder = a.info.Encoder
@@ -529,6 +552,10 @@ func (s *Server) connect(c *client, msg protocol.Message) {
 	c.user = u
 	s.mu.Unlock()
 	dev, _ := s.store.GetDevice(msg.Target)
+	if dev.Pending {
+		c.post(protocol.Message{Type: protocol.TypeError, Reason: "Gerät wartet auf Freigabe durch einen Administrator"})
+		return
+	}
 	if !u.CanAccess(msg.Target) {
 		s.audit.Log(AuditEntry{Event: "session.denied", User: u.Name, Device: dev.Name, IP: c.addr, Detail: "no permission " + msg.Target})
 		c.post(protocol.Message{Type: protocol.TypeError, Reason: "Keine Berechtigung für dieses Gerät"})
@@ -542,7 +569,7 @@ func (s *Server) connect(c *client, msg protocol.Message) {
 		c.post(protocol.Message{Type: protocol.TypeError, Reason: "Gerät ist offline"})
 		return
 	}
-	var displaced []*session
+	var displaced, watched []*session
 	var busyBy string
 	for _, sess := range s.sessions {
 		if sess.agent != agent {
@@ -555,7 +582,9 @@ func (s *Server) connect(c *client, msg protocol.Message) {
 		case msg.Takeover && u.Admin:
 			displaced = append(displaced, sess)
 		case u.Admin:
-			// Admins may join alongside (support / shadowing).
+			// Admins may join alongside (support / shadowing); the user
+			// being watched is told so.
+			watched = append(watched, sess)
 		default:
 			busyBy = sess.viewer.user.DisplayName
 		}
@@ -582,7 +611,14 @@ func (s *Server) connect(c *client, msg protocol.Message) {
 		s.logSessionEnd(old, reason)
 	}
 
-	s.audit.Log(AuditEntry{Event: "session.start", User: u.Name, Device: dev.Name, IP: c.addr, Detail: sess.id})
+	for _, w := range watched {
+		w.viewer.post(protocol.Message{Type: protocol.TypeNotice, Reason: "Administrator " + u.DisplayName + " ist dieser Sitzung beigetreten"})
+	}
+	detail := sess.id
+	if len(watched) > 0 {
+		detail += " (shadow)"
+	}
+	s.audit.Log(AuditEntry{Event: "session.start", User: u.Name, Device: dev.Name, IP: c.addr, Detail: detail})
 	c.post(protocol.Message{
 		Type:       protocol.TypeSessionStarted,
 		Session:    sess.id,

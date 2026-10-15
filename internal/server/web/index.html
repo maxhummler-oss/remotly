@@ -4,117 +4,160 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark light">
-  <meta name="theme-color" content="#0b0f17">
+  <meta name="theme-color" content="#0a0c18">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Remotly</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b82f6'/%3E%3Cpath d='M9 10h14v9H9z' fill='none' stroke='white' stroke-width='2.5' stroke-linejoin='round'/%3E%3Cpath d='M13 23h6' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%233aa0ff'/%3E%3Cstop offset='.6' stop-color='%235e5ce6'/%3E%3Cstop offset='1' stop-color='%23bf5af2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='url(%23g)'/%3E%3Crect x='8' y='9.5' width='16' height='10.5' rx='2' fill='none' stroke='white' stroke-width='2.2'/%3E%3Cpath d='M13 24h6' stroke='white' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <!-- Login ------------------------------------------------------------ -->
+  <!-- Liquid glass lens: bends whatever lies behind the glass (Chromium). -->
+  <svg width="0" height="0" aria-hidden="true" focusable="false" class="hidden-svg">
+    <filter id="liquid-glass" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.006 0.009" numOctaves="2" seed="7" result="noise"/>
+      <feGaussianBlur in="noise" stdDeviation="2.5" result="soft"/>
+      <feDisplacementMap in="SourceGraphic" in2="soft" scale="26" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+  </svg>
+
+  <div class="wallpaper" aria-hidden="true">
+    <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div><div class="blob b4"></div>
+    <div class="grain"></div>
+  </div>
+
+  <!-- Login -------------------------------------------------------------- -->
   <section id="view-login" class="view center hidden">
-    <form id="login-form" class="card auth" autocomplete="on">
-      <div class="brand big"><span class="brand-mark"></span><span>Remotly</span></div>
-      <p class="muted" id="login-server"></p>
-      <label class="field">
-        <span>Benutzername</span>
-        <input id="login-user" name="username" autocomplete="username" required autofocus>
-      </label>
-      <label class="field">
-        <span>Passwort</span>
-        <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
-      </label>
-      <button type="submit" class="btn primary block" id="login-submit">Anmelden</button>
-      <p id="login-error" class="error" role="alert"></p>
-      <p id="login-setup" class="hint hidden">Noch kein Benutzer vorhanden. Auf dem Server ausführen:<br>
-        <code>sudo remotly-server user add admin --admin</code></p>
-    </form>
+    <div class="auth glass refract">
+      <div class="app-icon" data-icon="display"></div>
+      <h1>Remotly</h1>
+      <p class="lead" id="login-server">Fernzugriff auf deinen Arbeitsplatz</p>
+
+      <form id="login-form" autocomplete="on">
+        <div id="login-step-pass">
+          <label class="field">
+            <span>Benutzername</span>
+            <input id="login-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+          </label>
+          <label class="field">
+            <span>Passwort</span>
+            <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
+          </label>
+        </div>
+        <div id="login-step-code" class="hidden">
+          <label class="field">
+            <span>Bestätigungscode aus deiner Authenticator-App</span>
+            <input id="login-code" class="code" inputmode="numeric" pattern="[0-9 ]*" maxlength="7" autocomplete="one-time-code" placeholder="000000">
+          </label>
+        </div>
+        <button type="submit" class="btn primary block" id="login-submit">Anmelden</button>
+        <button type="button" class="btn plain small hidden" id="login-back">Zurück</button>
+        <p id="login-error" class="error" role="alert"></p>
+        <p id="login-setup" class="hint hidden">Noch kein Benutzer vorhanden. Auf dem Server ausführen:<br>
+          <code>sudo remotly-server user add admin --admin</code></p>
+      </form>
+      <div class="lockline"><span data-icon="lock"></span>Ende-zu-Ende verschlüsselt</div>
+    </div>
   </section>
 
-  <!-- App shell ---------------------------------------------------------- -->
+  <!-- Forced 2FA setup ---------------------------------------------------------- -->
+  <section id="view-setup2fa" class="view center hidden">
+    <div class="auth glass refract">
+      <div class="app-icon" data-icon="shield"></div>
+      <h1>Konto schützen</h1>
+      <p class="lead">Dieser Server verlangt eine Zwei-Faktor-Anmeldung. Richte sie jetzt einmalig ein.</p>
+      <button class="btn primary block" id="setup2fa-start">Einrichten</button>
+      <button class="btn plain small" id="setup2fa-logout">Abmelden</button>
+    </div>
+  </section>
+
+  <!-- App shell ------------------------------------------------------------------ -->
   <section id="view-app" class="view hidden">
-    <header class="topbar">
-      <div class="brand"><span class="brand-mark"></span><span>Remotly</span><span class="muted" id="server-name"></span></div>
-      <nav class="tabs" id="tabs">
-        <button class="tab active" data-tab="devices">Geräte</button>
-        <button class="tab hidden" data-tab="admin" id="tab-admin">Verwaltung</button>
+    <header class="topbar glass refract">
+      <div class="brand"><span class="app-icon sm" data-icon="display"></span><span>Remotly</span><span class="muted" id="server-name"></span></div>
+      <nav class="seg" id="tabs" role="tablist">
+        <span class="seg-thumb" id="seg-thumb"></span>
+        <button class="active" data-tab="devices" role="tab">Geräte</button>
+        <button class="hidden" data-tab="admin" id="tab-admin" role="tab">Verwaltung</button>
       </nav>
       <div class="topbar-right">
         <span class="conn" id="conn-state" title="Verbindung zum Server"></span>
-        <button class="btn ghost" id="btn-user"><span class="avatar" id="user-avatar"></span><span id="user-name"></span></button>
+        <button class="btn plain user-btn" id="btn-user"><span class="avatar" id="user-avatar"></span><span class="user-name" id="user-name"></span></button>
       </div>
     </header>
 
-    <div class="menu hidden" id="user-menu">
-      <button data-action="password">Passwort ändern</button>
-      <button data-action="settings">Einstellungen</button>
-      <button data-action="logout" class="danger-text">Abmelden</button>
+    <div class="menu glass hidden" id="user-menu">
+      <div class="who"><b id="menu-name"></b><span id="menu-login"></span></div>
+      <hr>
+      <button data-action="2fa"><span data-icon="shield"></span><span id="menu-2fa">Zwei-Faktor-Anmeldung</span></button>
+      <button data-action="password"><span data-icon="key"></span>Passwort ändern</button>
+      <button data-action="settings"><span data-icon="sliders"></span>Einstellungen</button>
+      <hr>
+      <button data-action="logout" class="danger-text"><span data-icon="logout"></span>Abmelden</button>
     </div>
 
     <main class="content">
-      <!-- Devices -->
       <section id="tab-devices">
         <div class="section-head">
           <div>
-            <h1>Meine Geräte</h1>
-            <p class="muted" id="devices-sub">Wähle einen Rechner, um dich zu verbinden.</p>
+            <h1 id="greeting">Meine Geräte</h1>
+            <p id="devices-sub"></p>
           </div>
-          <input type="search" id="device-search" class="search" placeholder="Suchen…" aria-label="Geräte suchen">
+          <div class="search-wrap"><span data-icon="search"></span><input type="search" id="device-search" placeholder="Suchen" aria-label="Geräte suchen"></div>
         </div>
         <div id="device-list" class="grid"></div>
-        <div id="no-devices" class="empty hidden">
-          <div class="empty-icon"></div>
-          <h3>Keine Geräte</h3>
-          <p class="muted">Dir sind noch keine Rechner zugewiesen. Wende dich an deinen Administrator.</p>
+        <div id="no-devices" class="empty glass hidden">
+          <div class="os-icon" data-icon="display"></div>
+          <h2>Noch keine Geräte</h2>
+          <p class="muted">Dir ist noch kein Rechner zugewiesen. Wende dich an deinen Administrator.</p>
         </div>
       </section>
 
-      <!-- Admin -->
       <section id="tab-admin-panel" class="hidden">
         <div class="section-head">
           <div>
             <h1>Verwaltung</h1>
-            <p class="muted">Benutzer, Geräte, aktive Sitzungen und Protokoll.</p>
+            <p>Benutzer, Geräte, Sitzungen und Protokoll.</p>
           </div>
         </div>
 
-        <div class="stats-row" id="admin-kpis"></div>
+        <div class="kpis" id="admin-kpis"></div>
 
-        <div class="panel">
+        <div class="panel glass">
           <div class="panel-head"><h2>Aktive Sitzungen</h2></div>
           <div class="table-wrap"><table id="tbl-sessions"></table></div>
         </div>
 
-        <div class="panel">
+        <div class="panel glass">
           <div class="panel-head">
             <h2>Benutzer</h2>
-            <button class="btn primary" id="btn-add-user">+ Benutzer</button>
+            <button class="btn primary small" id="btn-add-user"><span data-icon="plus"></span>Benutzer</button>
           </div>
           <div class="table-wrap"><table id="tbl-users"></table></div>
         </div>
 
-        <div class="panel">
+        <div class="panel glass">
           <div class="panel-head">
             <h2>Geräte</h2>
-            <button class="btn" id="btn-add-device">+ Gerät hinzufügen</button>
+            <button class="btn small" id="btn-add-device"><span data-icon="plus"></span>Gerät hinzufügen</button>
           </div>
           <div class="table-wrap"><table id="tbl-devices"></table></div>
         </div>
 
-        <div class="panel">
+        <div class="panel glass">
           <div class="panel-head"><h2>Thin Clients</h2></div>
           <div class="panel-body prose">
             <p>Thin Clients brauchen nur einen aktuellen Chromium-basierten Browser (Chrome, Edge, Chromium). Für den Kiosk-Betrieb:</p>
-            <div class="cmd"><code id="kiosk-cmd"></code><button class="btn copy" data-copy="kiosk-cmd">Kopieren</button></div>
+            <div class="cmd"><code id="kiosk-cmd"></code><button class="btn small" id="copy-kiosk">Kopieren</button></div>
             <p class="muted small">Damit der Browser dem Server ohne Warnung vertraut, einmalig das
               <a href="/ca.crt" id="ca-link">Remotly-CA-Zertifikat</a> als vertrauenswürdige Stammzertifizierungsstelle installieren
               (z. B. per Gruppenrichtlinie). Fingerabdruck (SHA-256): <code id="ca-fp" class="wrap"></code></p>
           </div>
         </div>
 
-        <div class="panel">
+        <div class="panel glass">
           <div class="panel-head">
             <h2>Protokoll</h2>
-            <button class="btn ghost" id="btn-reload-audit">Aktualisieren</button>
+            <button class="btn plain small" id="btn-reload-audit"><span data-icon="refresh"></span>Aktualisieren</button>
           </div>
           <div class="table-wrap scroll"><table id="tbl-audit"></table></div>
         </div>
@@ -122,18 +165,21 @@
     </main>
   </section>
 
-  <!-- Kiosk ------------------------------------------------------------- -->
+  <!-- Kiosk (thin client lock screen) ------------------------------------------------ -->
   <section id="view-kiosk" class="view center hidden">
     <div class="kiosk">
-      <div class="brand big"><span class="brand-mark"></span><span>Remotly</span></div>
+      <div>
+        <div class="clock" id="kiosk-clock">--:--</div>
+        <div class="date" id="kiosk-date"></div>
+      </div>
       <p class="kiosk-hello" id="kiosk-hello"></p>
       <div id="kiosk-devices" class="kiosk-devices"></div>
       <p class="error" id="kiosk-error"></p>
-      <button class="btn ghost" id="kiosk-logout">Abmelden</button>
+      <button class="btn plain" id="kiosk-logout"><span data-icon="logout"></span>Abmelden</button>
     </div>
   </section>
 
-  <!-- Remote session ----------------------------------------------------- -->
+  <!-- Remote session ------------------------------------------------------------------- -->
   <section id="view-session" class="hidden">
     <video id="video" autoplay muted playsinline disablepictureinpicture tabindex="-1"></video>
     <div id="session-overlay" class="session-overlay">
@@ -147,32 +193,34 @@
       <span id="tb-desktop" class="tb-badge hidden"></span>
       <span id="stats" class="tb-stats">–</span>
       <span class="tb-sep"></span>
-      <button class="tb-btn" id="btn-audio" title="Ton ein/aus">🔊</button>
-      <button class="tb-btn" id="btn-fullscreen" title="Vollbild – übernimmt die komplette Tastatur (Alt+Tab, Windows-Taste …)">⛶</button>
-      <button class="tb-btn" id="btn-pointer" title="Maus fangen (relativer Modus für Spiele/3D). Esc lange drücken zum Beenden.">🎯</button>
-      <label class="tb-toggle" title="Cmd und Strg tauschen (Mac ↔ Windows)"><input type="checkbox" id="swap-meta"> ⌘⇄Strg</label>
-      <button class="tb-btn" id="btn-cad" title="Strg+Alt+Entf senden">⌃⌥⌦</button>
-      <button class="tb-btn" id="btn-stats" title="Leistungsdetails">📊</button>
-      <button class="tb-btn danger" id="btn-disconnect" title="Trennen">✕</button>
+      <button class="tb-btn" id="btn-audio" title="Ton ein/aus" data-icon="speaker"></button>
+      <button class="tb-btn" id="btn-fullscreen" title="Vollbild – übernimmt die komplette Tastatur (Alt+Tab, Windows-Taste …)" data-icon="expand"></button>
+      <button class="tb-btn" id="btn-pointer" title="Maus fangen (relativer Modus für Spiele/3D). Esc lange drücken zum Beenden." data-icon="target"></button>
+      <label class="tb-swap" title="Cmd und Strg tauschen (Mac ↔ Windows)"><input type="checkbox" id="swap-meta"><span>⌘⇄⌃</span></label>
+      <button class="tb-btn" id="btn-cad" title="Strg+Alt+Entf senden" data-icon="keyboard"></button>
+      <button class="tb-btn" id="btn-stats" title="Leistungsdetails" data-icon="gauge"></button>
+      <button class="tb-btn danger" id="btn-disconnect" title="Trennen" data-icon="close"></button>
     </div>
     <pre id="stats-detail" class="stats-detail hidden"></pre>
-    <button id="btn-unmute" class="unmute hidden">🔇 Ton aktivieren</button>
+    <button id="btn-unmute" class="btn unmute hidden"><span data-icon="speaker"></span>Ton aktivieren</button>
   </section>
 
-  <!-- Dialogs ------------------------------------------------------------ -->
+  <!-- Sheet dialog ----------------------------------------------------------------------- -->
   <dialog id="dlg" class="dialog">
-    <form method="dialog" id="dlg-form">
-      <h2 id="dlg-title"></h2>
-      <div id="dlg-body"></div>
-      <p class="error" id="dlg-error"></p>
-      <div class="dialog-actions">
-        <button value="cancel" class="btn ghost" id="dlg-cancel" formnovalidate>Abbrechen</button>
-        <button value="ok" class="btn primary" id="dlg-ok">OK</button>
-      </div>
-    </form>
+    <div class="sheet glass">
+      <form method="dialog" id="dlg-form">
+        <h2 id="dlg-title"></h2>
+        <div id="dlg-body"></div>
+        <p class="error" id="dlg-error"></p>
+        <div class="dialog-actions">
+          <button value="cancel" class="btn plain" id="dlg-cancel" formnovalidate>Abbrechen</button>
+          <button value="ok" class="btn primary" id="dlg-ok">OK</button>
+        </div>
+      </form>
+    </div>
   </dialog>
 
-  <div id="toast" class="toast hidden" role="status"></div>
+  <div id="toast" class="toast glass refract hidden" role="status"><span class="toast-icon" id="toast-icon"></span><span id="toast-text"></span></div>
   <script src="app.js"></script>
 </body>
 </html>

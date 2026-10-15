@@ -50,8 +50,16 @@ Routing), läuft der Datenstrom über das TURN-Relay des Servers.
   ohne spürbare Verzögerung.
 - Mausbewegungen über einen unzuverlässigen, ungeordneten Datenkanal (ein
   verlorenes Paket hält nie neuere Positionen auf), Klicks/Tasten zuverlässig.
+- **Rohe Zeigerereignisse** (`pointerrawupdate`): jede Mausbewegung geht sofort
+  raus, statt auf den nächsten Bildaufbau des Browsers zu warten.
+- **120 fps automatisch** unter Windows mit Hardware-Encoder: halbiert die Zeit,
+  bis eine Bildschirmänderung erfasst wird – auch an 60-Hz-Bildschirmen.
+- Während einer Sitzung wird die Oberfläche hinter dem Video komplett
+  abgeschaltet; Glas-Effekte über dem Video sind so leicht, dass sie keine
+  Bilder kosten.
 - Live-Anzeige in der Sitzung: Netzwerk-RTT, Eingabe-RTT, Jitter-Puffer,
-  Dekodierzeit, fps, Datenrate, direkt/Relay.
+  Dekodierzeit, **gemessene Empfang→Anzeige-Zeit pro Frame**, fps, Datenrate,
+  direkt/Relay.
 
 **Büro-Betrieb**
 - Benutzerkonten mit Rollen (Admin/Benutzer) und **Gerätezuweisung**: jeder sieht
@@ -71,11 +79,27 @@ Routing), läuft der Datenstrom über das TURN-Relay des Servers.
   Remote-Rechner), Cmd↔Strg-Tausch für Mac↔Windows.
 - Admin-Oberfläche: Benutzer, Geräte, aktive Sitzungen (beenden), Audit-Protokoll.
 
+**Design**
+- Oberfläche im **Liquid-Glass-Stil**: lichtbrechende Glasflächen mit
+  Lichtkanten über einem lebendigen Hintergrund, Kapsel-Buttons,
+  Segment-Umschalter, Banner-Benachrichtigungen, Sheets – hell und dunkel,
+  berücksichtigt „Transparenz reduzieren“ und „Bewegung reduzieren“.
+- Thin-Client-Kiosk als **Sperrbildschirm** mit großer Uhr.
+
 **Sicherheit**
+- **Zwei-Faktor-Anmeldung (TOTP)** mit QR-Code für jede Authenticator-App
+  (Microsoft/Google Authenticator, Apple Passwörter, 1Password …), Schutz gegen
+  Wiederverwendung von Codes; per `"require2fa": true` für alle Pflicht.
+- **Neue Geräte müssen von einem Admin freigegeben werden** – ein geleakter
+  Registrierungsschlüssel reicht nicht, um Rechner einzuschleusen.
+- Schaut ein Admin bei einer Sitzung zu, wird der Benutzer **sofort informiert**.
+- Kiosk-Thin-Clients melden sich nach 2 Minuten Inaktivität **automatisch ab**.
 - HTTPS standardmäßig, mit eigener **lokaler CA** (einmal auf den Thin Clients
-  installieren) oder eurem Firmen-Zertifikat.
+  installieren) oder eurem Firmen-Zertifikat; TLS 1.2 nur mit
+  Forward-Secrecy-AEAD-Ciphers, TLS 1.3 bevorzugt.
 - Passwörter mit **bcrypt**, Session-Cookies `HttpOnly` + `Secure` + `SameSite=Strict`,
-  Origin-Prüfung (CSRF/Cross-Site-WebSocket), strenge Content-Security-Policy.
+  Origin-Prüfung (CSRF/Cross-Site-WebSocket), strenge Content-Security-Policy,
+  HSTS, COOP/CORP, kein Framing.
 - **Brute-Force-Schutz** (Sperre pro IP und Benutzer mit exponentieller Wartezeit),
   kein Verraten existierender Benutzernamen über die Antwortzeit.
 - Jeder Agent hat ein **eigenes Geheimnis** (nur gehasht gespeichert), einzeln
@@ -127,9 +151,12 @@ Einzeiler mit Registrierungsschlüssel:
 - **macOS / Linux** (Terminal): installiert Agent + Autostart. macOS fragt einmalig
   nach den Rechten *Bildschirmaufnahme* und *Bedienungshilfen*.
 
-### 3. Benutzer anlegen und Rechner zuweisen
+### 3. Geräte freigeben, Benutzer anlegen, Rechner zuweisen
 
-**Verwaltung → + Benutzer**: Benutzer anlegen, erlaubte Geräte ankreuzen. Fertig.
+Neu registrierte Rechner erscheinen in der Verwaltung als „Wartet auf
+Freigabe“ → **Freigeben**. Dann **+ Benutzer**: Benutzer anlegen, erlaubte
+Geräte ankreuzen. Jeder Benutzer kann im Menü oben rechts die
+Zwei-Faktor-Anmeldung einrichten (oder `require2fa` macht sie zur Pflicht).
 
 ### 4. Thin Clients einrichten
 
@@ -178,8 +205,8 @@ ohne H.264 bekommen automatisch VP8 (Software-Encoding auf dem Rack-PC).
 | Warten auf den nächsten Bildaufbau (60 Hz) | 0–16 ms |
 | **Summe** | **≈ 10–25 ms** |
 
-Bei 120/144 Hz (`"fps": 120` in der Agent-Konfiguration und ein entsprechender
-Dummy-Stecker) halbiert sich der letzte Posten. Im automatisierten Test in einer
+Mit einem 120/144-Hz-Dummy-Stecker (und 120 fps, unter Windows mit GPU
+automatisch) halbiert sich der letzte Posten. Im automatisierten Test in einer
 virtuellen Umgebung (reine Software-Kodierung/-Dekodierung) wurden ≈ 22–30 ms
 gemessen, Eingabe-Rundlaufzeit ≈ 1–3 ms. Mit lokalem Mauszeiger (Windows) ist die
 Mausbewegung ohnehin verzögerungsfrei.
@@ -214,6 +241,8 @@ In der Sitzung zeigt die Leiste oben die geschätzte Latenz; 📊 öffnet Detail
 | `relayPortMin`/`Max` | `50000`/`50999` | UDP-Ports für Relay-Verbindungen |
 | `publicIp` | automatisch | IP, unter der Thin Clients den Server erreichen |
 | `sessionHours` | `12` | Gültigkeit einer Anmeldung |
+| `require2fa` | `false` | Zwei-Faktor-Anmeldung für alle Benutzer erzwingen |
+| `approveDevices` | `true` | Neue Geräte erst nach Admin-Freigabe nutzbar |
 | `dataDir` | `/var/lib/remotly` | Benutzer/Geräte (`state.json`), Audit-Log, Zertifikate |
 
 Befehle:
@@ -221,6 +250,7 @@ Befehle:
 ```sh
 sudo remotly-server -config /etc/remotly/server.json user add NAME [--admin] [--display "Vor Nachname"]
 sudo remotly-server -config /etc/remotly/server.json user passwd NAME
+sudo remotly-server -config /etc/remotly/server.json user reset-2fa NAME   # Telefon verloren
 sudo remotly-server -config /etc/remotly/server.json user list
 sudo remotly-server -config /etc/remotly/server.json enroll-key [--rotate]
 ```
@@ -233,7 +263,7 @@ Linux `~/.config/remotly/`.
 
 | Feld | Standard | Bedeutung |
 |---|---|---|
-| `fps` | `60` | Bildrate (z. B. 120 für High-Refresh) |
+| `fps` | `0` (auto) | 0 = 120 fps bei Windows + Hardware-Encoder, sonst 60; oder fester Wert |
 | `bitrateKbps` | `30000` | Datenrate (LAN: 20–50 Mbit/s sind unproblematisch) |
 | `maxWidth` | `0` | 0 = native Auflösung (ermöglicht Zero-Copy), sonst herunterskalieren |
 | `encoder` | `auto` | oder fest: `h264_nvenc`, `h264_amf`, `h264_qsv`, `h264_videotoolbox`, `libx264` |

@@ -47,6 +47,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/me", s.handleMe)
 	mux.HandleFunc("POST /api/password", s.user(s.handleChangePassword))
+	mux.HandleFunc("POST /api/totp/setup", s.userSetup(s.handleTOTPSetup))
+	mux.HandleFunc("POST /api/totp/confirm", s.userSetup(s.handleTOTPConfirm))
+	mux.HandleFunc("POST /api/totp/disable", s.user(s.handleTOTPDisable))
 	mux.HandleFunc("POST /api/devices/{id}/wake", s.user(s.handleWake))
 
 	mux.HandleFunc("GET /api/admin/overview", s.admin(s.handleOverview))
@@ -103,7 +106,20 @@ func csrfOK(r *http.Request) bool {
 	return r.Method == http.MethodGet || sameOrigin(r)
 }
 
+// user requires a logged-in user who satisfies the 2FA policy.
 func (s *Server) user(h func(http.ResponseWriter, *http.Request, User)) http.HandlerFunc {
+	return s.userSetup(func(w http.ResponseWriter, r *http.Request, u User) {
+		if s.mustSetup2FA(u) {
+			fail(w, http.StatusForbidden, "Bitte zuerst die Zwei-Faktor-Anmeldung einrichten")
+			return
+		}
+		h(w, r, u)
+	})
+}
+
+// userSetup requires a logged-in user, but allows users who still have to
+// set up 2FA (for the setup endpoints themselves).
+func (s *Server) userSetup(h func(http.ResponseWriter, *http.Request, User)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !csrfOK(r) {
 			fail(w, http.StatusForbidden, "cross-origin request rejected")
@@ -116,6 +132,10 @@ func (s *Server) user(h func(http.ResponseWriter, *http.Request, User)) http.Han
 		}
 		h(w, r, u)
 	}
+}
+
+func (s *Server) mustSetup2FA(u User) bool {
+	return s.cfg.Require2FA && u.TOTPSecret == ""
 }
 
 func (s *Server) admin(h func(http.ResponseWriter, *http.Request, User)) http.HandlerFunc {
@@ -139,6 +159,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		Code     string `json:"code"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
@@ -157,6 +178,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.audit.Log(AuditEntry{Event: "login.failed", User: name, IP: ip})
 		fail(w, http.StatusUnauthorized, "Benutzername oder Passwort falsch")
 		return
+	}
+	if u.TOTPSecret != "" {
+		if req.Code == "" {
+			// Password is right; ask for the second factor.
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "Bestätigungscode erforderlich", "needsCode": true})
+			return
+		}
+		if !s.totp.check(u.Name, u.TOTPSecret, req.Code) {
+			s.auth.fail(keys...)
+			s.audit.Log(AuditEntry{Event: "login.failed", User: name, IP: ip, Detail: "2FA code"})
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "Bestätigungscode ungültig", "needsCode": true})
+			return
+		}
 	}
 	s.auth.succeed(keys...)
 	ws := s.auth.create(u.Name, ip)
@@ -179,11 +213,14 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) meResponse(u User) map[string]any {
 	return map[string]any{
-		"name":        u.Name,
-		"displayName": u.DisplayName,
-		"admin":       u.Admin,
-		"serverName":  s.cfg.Name,
-		"version":     s.version,
+		"name":         u.Name,
+		"displayName":  u.DisplayName,
+		"admin":        u.Admin,
+		"serverName":   s.cfg.Name,
+		"version":      s.version,
+		"totp":         u.TOTPSecret != "",
+		"mustSetup2FA": s.mustSetup2FA(u),
+		"require2FA":   s.cfg.Require2FA,
 	}
 }
 
@@ -258,6 +295,8 @@ type adminSession struct {
 type adminUser struct {
 	User
 	PasswordHash string `json:"passwordHash,omitempty"` // never sent
+	TOTPSecret   string `json:"totpSecret,omitempty"`   // never sent
+	TOTP         bool   `json:"totp"`
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request, _ User) {
@@ -292,7 +331,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request, _ User) 
 
 	us := make([]adminUser, len(users))
 	for i, u := range users {
-		us[i] = adminUser{User: u}
+		us[i] = adminUser{User: u, TOTP: u.TOTPSecret != ""}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"users":         us,
@@ -302,6 +341,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request, _ User) 
 		"caFingerprint": caFP,
 		"agents":        s.agentBinaries(),
 		"tls":           s.cfg.TLS,
+		"require2FA":    s.cfg.Require2FA,
 	})
 }
 
@@ -357,11 +397,14 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request, admin U
 	if p.Devices != nil {
 		what = append(what, "devices")
 	}
+	if p.ResetTOTP {
+		what = append(what, "2fa-reset")
+	}
 	if p.DisplayName != nil {
 		what = append(what, "name")
 	}
 	// Credentials or rights changed: force a fresh login everywhere.
-	if p.Password != nil || (p.Disabled != nil && *p.Disabled) || p.Admin != nil {
+	if p.Password != nil || (p.Disabled != nil && *p.Disabled) || p.Admin != nil || p.ResetTOTP {
 		s.auth.revokeUser(name)
 		s.disconnectUser(name)
 	} else {
@@ -386,17 +429,28 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request, admin 
 func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request, admin User) {
 	id := r.PathValue("id")
 	var req struct {
-		Name string `json:"name"`
+		Name    string `json:"name"`
+		Approve bool   `json:"approve"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.store.RenameDevice(id, req.Name); err != nil {
-		fail(w, http.StatusBadRequest, err.Error())
-		return
+	if req.Name != "" {
+		if err := s.store.RenameDevice(id, req.Name); err != nil {
+			fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.audit.Log(AuditEntry{Event: "device.renamed", User: admin.Name, Device: req.Name, IP: remoteIP(r), Detail: id})
 	}
-	s.audit.Log(AuditEntry{Event: "device.renamed", User: admin.Name, Device: req.Name, IP: remoteIP(r), Detail: id})
+	if req.Approve {
+		if err := s.store.ApproveDevice(id); err != nil {
+			fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		d, _ := s.store.GetDevice(id)
+		s.audit.Log(AuditEntry{Event: "device.approved", User: admin.Name, Device: d.Name, IP: remoteIP(r), Detail: id})
+	}
 	s.broadcastDevices()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -474,7 +528,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	id, secret, err := s.store.Enroll(req.Key, req.Name, req.Hostname, req.OS, req.Arch, ip)
+	id, secret, err := s.store.Enroll(req.Key, req.Name, req.Hostname, req.OS, req.Arch, ip, s.cfg.ApproveDevices)
 	if err != nil {
 		s.auth.fail("ip:" + ip)
 		s.audit.Log(AuditEntry{Event: "agent.enroll_failed", IP: ip, Detail: req.Hostname})

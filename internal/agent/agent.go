@@ -128,12 +128,23 @@ func (a *Agent) pipelineFor(codec stream.Codec) (*stream.Pipeline, error) {
 	if err := a.failed[codec]; err != nil {
 		return nil, err
 	}
-	enc, err := stream.SelectEncoder(a.opts, codec, log.Printf)
+	opts := a.opts
+	if opts.FPS == 0 {
+		opts.FPS = 60
+	}
+	enc, err := stream.SelectEncoder(opts, codec, log.Printf)
 	if err != nil {
 		a.failed[codec] = err
 		return nil, err
 	}
-	p := stream.NewPipeline(a.opts, enc)
+	if a.opts.FPS == 0 && runtime.GOOS == "windows" && stream.IsHardware(enc) {
+		// Capturing at 120 fps halves the time a screen update waits to be
+		// grabbed, even on a 60 Hz display. Hardware encoders handle the
+		// (mostly duplicate) frames at no measurable cost.
+		opts.FPS = 120
+	}
+	log.Printf("%s pipeline: %s at %d fps", codec, enc, opts.FPS)
+	p := stream.NewPipeline(opts, enc)
 	a.pipelines[codec] = p
 	return p, nil
 }

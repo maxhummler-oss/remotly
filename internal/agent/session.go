@@ -172,7 +172,7 @@ func (a *Agent) startSession(msg protocol.Message) error {
 			"encoder":   pipeline.Encoder(),
 			"codec":     pipeline.Codec(),
 			"capture":   pipeline.Variant(),
-			"fps":       a.cfg.FPS,
+			"fps":       pipeline.FPS(),
 			"bitrate":   a.cfg.BitrateKbps,
 			"input":     s.inj != nil,
 			"audio":     a.audio != nil,

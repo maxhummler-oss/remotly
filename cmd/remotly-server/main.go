@@ -25,6 +25,7 @@ Usage:
   remotly-server user add NAME [--admin] [--display "Vor Nachname"]
   remotly-server user passwd NAME
   remotly-server user del NAME
+  remotly-server user reset-2fa NAME           remove a user's authenticator (lost phone)
   remotly-server user list
   remotly-server enroll-key [--rotate]          show (or rotate) the agent enrollment key
   remotly-server version
@@ -104,7 +105,11 @@ func userCmd(store *server.Store, args []string) error {
 			if u.Disabled {
 				state = " (deaktiviert)"
 			}
-			fmt.Printf("%-20s %-28s %-8s %d Geräte%s\n", u.Name, u.DisplayName, role, len(u.Devices), state)
+			mfa := "-"
+			if u.TOTPSecret != "" {
+				mfa = "2FA"
+			}
+			fmt.Printf("%-20s %-28s %-8s %-4s %d Geräte%s\n", u.Name, u.DisplayName, role, mfa, len(u.Devices), state)
 		}
 		return nil
 	case "add":
@@ -142,6 +147,13 @@ func userCmd(store *server.Store, args []string) error {
 			return err
 		}
 		fmt.Println("Passwort geändert. Bestehende Anmeldungen dieses Benutzers enden beim nächsten Server-Neustart.")
+		return nil
+	case "reset-2fa":
+		name, _ := splitName(args)
+		if err := store.SetTOTP(name, ""); err != nil {
+			return err
+		}
+		fmt.Println("Zwei-Faktor-Anmeldung zurückgesetzt. Der Benutzer richtet sie bei der nächsten Anmeldung neu ein.")
 		return nil
 	case "del":
 		name, _ := splitName(args)
