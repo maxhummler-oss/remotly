@@ -143,7 +143,16 @@ func (h *handler) supervise(stop chan struct{}) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	lastStart := time.Time{}
+	exe, _ := os.Executable()
+	exeInfo, _ := os.Stat(exe)
 	for {
+		// The worker replaced the binary (auto-update): restart the
+		// service itself too, via the SCM's recovery actions.
+		if info, err := os.Stat(exe); err == nil && exeInfo != nil && !info.ModTime().Equal(exeInfo.ModTime()) {
+			log.Printf("agent binary updated, restarting service")
+			kill()
+			os.Exit(1)
+		}
 		session := windows.WTSGetActiveConsoleSessionId()
 		alive := worker != 0
 		if alive {

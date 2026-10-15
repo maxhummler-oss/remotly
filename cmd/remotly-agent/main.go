@@ -156,7 +156,13 @@ func cmdRun(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return a.Run(ctx)
+	if err := a.Run(ctx); errors.Is(err, agent.ErrUpdated) {
+		log.Printf("restarting into the updated agent")
+		os.Exit(3) // non-zero: the supervisor restarts us with the new binary
+	} else if err != nil {
+		return err
+	}
+	return nil
 }
 
 func cmdProbe(args []string) error {

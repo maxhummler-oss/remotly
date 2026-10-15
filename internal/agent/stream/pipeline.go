@@ -17,8 +17,7 @@ type Sink interface {
 }
 
 type subscriber struct {
-	sink         Sink
-	needKeyframe bool
+	sink Sink
 }
 
 // Pipeline runs one ffmpeg capture/encode process shared by all viewers of
@@ -39,14 +38,92 @@ type Pipeline struct {
 	proc    Process
 	restart bool
 	lastKF  time.Time // last keyframe-forcing restart
+
+	// Adaptive bitrate (see ReportLoss).
+	maxKbps    int // configured bitrate, possibly capped by the server
+	curKbps    int // bitrate ffmpeg currently runs with
+	lossy      int // consecutive loss reports above threshold
+	lastChange time.Time
+	lastLoss   time.Time
 }
+
+const (
+	minKbps       = 3000
+	lossThreshold = 0.04 // 4 % packet loss
+)
 
 // NewPipeline creates an idle pipeline.
 func NewPipeline(opts Options, encoder string) *Pipeline {
 	if opts.Launch == nil {
 		opts.Launch = ExecLauncher
 	}
-	return &Pipeline{opts: opts, encoder: encoder, variants: Variants(opts, encoder), subs: map[Sink]*subscriber{}}
+	return &Pipeline{opts: opts, encoder: encoder, variants: Variants(opts, encoder), subs: map[Sink]*subscriber{},
+		maxKbps: opts.BitrateKbps, curKbps: opts.BitrateKbps}
+}
+
+// Display returns the display this pipeline captures.
+func (p *Pipeline) Display() int { return p.opts.Display }
+
+// Bitrate returns the current target bitrate in kbit/s.
+func (p *Pipeline) Bitrate() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.curKbps
+}
+
+// SetCap limits the bitrate (server policy for shared uplinks); 0 = none.
+func (p *Pipeline) SetCap(capKbps int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	max := p.opts.BitrateKbps
+	if capKbps > 0 && capKbps < max {
+		max = capKbps
+	}
+	if max == p.maxKbps {
+		return
+	}
+	p.maxKbps = max
+	if p.curKbps > max {
+		p.setBitrateLocked(max, "server cap")
+	}
+}
+
+// ReportLoss feeds the fraction of packets a viewer lost (0..1, from RTCP
+// receiver reports, about once per second). Sustained loss means the
+// network is saturated – typically many sessions sharing one uplink – so
+// the bitrate steps down; after a quiet period it climbs back. ffmpeg
+// cannot change bitrate on the fly, so a change restarts the encoder
+// (which also yields a fresh keyframe).
+func (p *Pipeline) ReportLoss(fraction float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	if fraction > lossThreshold {
+		p.lossy++
+		p.lastLoss = now
+		if p.lossy >= 2 && now.Sub(p.lastChange) > 4*time.Second && p.curKbps > minKbps {
+			p.setBitrateLocked(max(minKbps, p.curKbps*7/10), "packet loss")
+		}
+		return
+	}
+	p.lossy = 0
+	if p.curKbps < p.maxKbps && now.Sub(p.lastLoss) > 30*time.Second && now.Sub(p.lastChange) > 30*time.Second {
+		p.setBitrateLocked(min(p.maxKbps, p.curKbps*3/2), "network recovered")
+	}
+}
+
+func (p *Pipeline) setBitrateLocked(kbps int, why string) {
+	if kbps == p.curKbps {
+		return
+	}
+	log.Printf("bitrate %d -> %d kbit/s (%s)", p.curKbps, kbps, why)
+	p.curKbps = kbps
+	p.lastChange = time.Now()
+	p.lossy = 0
+	if p.proc != nil {
+		p.restart = true
+		p.proc.Kill()
+	}
 }
 
 // FPS returns the capture frame rate.
@@ -72,22 +149,26 @@ func (p *Pipeline) Variant() string {
 	return p.variants[p.current].Name
 }
 
-// Subscribe adds a sink. It receives frames starting at the next keyframe.
+// Subscribe adds a sink. It receives every frame from now on. Frames are
+// deliberately not held back until the next keyframe: browsers discard the
+// few undecodable frames and recover cleanly, whereas a stream that starts
+// mid-way at a keyframe confuses Chrome's VP8 frame-reference tracking
+// until it sends its own PLI (~3 s). A keyframe is forced right after
+// joining anyway.
 func (p *Pipeline) Subscribe(s Sink) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.subs[s] = &subscriber{sink: s, needKeyframe: true}
+	p.subs[s] = &subscriber{sink: s}
 	if !p.running {
 		p.running = true
 		p.stop = make(chan struct{})
 		p.stopped = make(chan struct{})
 		go p.loop(p.stop, p.stopped)
-	} else if p.proc != nil {
-		// A new viewer needs a keyframe now, not at the end of the GOP:
-		// restarting ffmpeg yields one within a few frames.
-		p.restart = true
-		p.lastKF = time.Now()
-		p.proc.Kill()
+	} else {
+		// A new viewer needs a keyframe now, not at the end of the GOP;
+		// restarting ffmpeg yields one within a few frames. The short delay
+		// lets the new connection settle on the browser side first.
+		time.AfterFunc(150*time.Millisecond, p.forceKeyframe)
 	}
 }
 
@@ -119,11 +200,22 @@ func (p *Pipeline) Restart() {
 
 // RequestKeyframe is called when a viewer reports unrecoverable packet
 // loss (RTCP PLI/FIR). ffmpeg cannot be asked for an IDR frame on the fly,
-// so it is restarted, at most every 3 seconds.
+// so it is restarted, at most once per second.
 func (p *Pipeline) RequestKeyframe() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.proc == nil || time.Since(p.lastKF) < 3*time.Second {
+	if p.proc == nil || time.Since(p.lastKF) < time.Second {
+		return
+	}
+	p.lastKF = time.Now()
+	p.restart = true
+	p.proc.Kill()
+}
+
+func (p *Pipeline) forceKeyframe() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.running || p.proc == nil {
 		return
 	}
 	p.lastKF = time.Now()
@@ -183,9 +275,11 @@ func (p *Pipeline) loop(stop, stopped chan struct{}) {
 func (p *Pipeline) runOnce(stop chan struct{}) (int, error) {
 	p.mu.Lock()
 	v := p.variants[p.current]
+	opts := p.opts
+	opts.BitrateKbps = p.curKbps
 	p.mu.Unlock()
 
-	args := BuildArgs(p.encoder, v, p.opts)
+	args := BuildArgs(p.encoder, v, opts)
 	proc, err := p.opts.Launch(p.opts.FFmpeg, args, false)
 	if err != nil {
 		return 0, err
@@ -253,12 +347,6 @@ func (p *Pipeline) pump(r io.Reader) (int, error) {
 
 		p.mu.Lock()
 		for _, sub := range p.subs {
-			if sub.needKeyframe {
-				if !frame.Keyframe {
-					continue
-				}
-				sub.needKeyframe = false
-			}
 			if err := sub.sink.WriteFrame(frame.Data, dur); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 				log.Printf("write frame: %v", err)
 			}

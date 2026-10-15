@@ -125,7 +125,7 @@ func userCmd(store *server.Store, args []string) error {
 		pw := *password
 		if pw == "" {
 			var err error
-			if pw, err = promptPassword(); err != nil {
+			if pw, err = promptPassword(name); err != nil {
 				return err
 			}
 		}
@@ -139,7 +139,7 @@ func userCmd(store *server.Store, args []string) error {
 		if name == "" {
 			return fmt.Errorf("Benutzername fehlt")
 		}
-		pw, err := promptPassword()
+		pw, err := promptPassword(name)
 		if err != nil {
 			return err
 		}
@@ -176,7 +176,7 @@ func splitName(args []string) (string, []string) {
 	return "", args
 }
 
-func promptPassword() (string, error) {
+func promptPassword(user string) (string, error) {
 	read := func(prompt string) (string, error) {
 		fmt.Fprint(os.Stderr, prompt)
 		if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -191,7 +191,7 @@ func promptPassword() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := server.ValidatePassword(pw); err != nil {
+	if err := server.ValidatePassword(pw, user); err != nil {
 		return "", err
 	}
 	if term.IsTerminal(int(os.Stdin.Fd())) {

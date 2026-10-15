@@ -158,3 +158,4 @@ func (l *linuxBackend) setClipboard(text string) {
 
 func (l *linuxBackend) keepAwake(bool) {}
 func (l *linuxBackend) sendSAS()       {}
+func (l *linuxBackend) displays() int  { return 1 }

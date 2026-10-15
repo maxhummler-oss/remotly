@@ -165,3 +165,33 @@ func (c *countSink) WriteFrame(data []byte, _ time.Duration) error {
 	}
 	return nil
 }
+
+func TestAdaptiveBitrate(t *testing.T) {
+	p := NewPipeline(Options{BitrateKbps: 20000}, "libx264")
+	p.ReportLoss(0.10)
+	if p.Bitrate() != 20000 {
+		t.Fatal("reacted to a single lossy report")
+	}
+	p.ReportLoss(0.10)
+	if p.Bitrate() != 14000 {
+		t.Fatalf("expected step down to 14000, got %d", p.Bitrate())
+	}
+	p.ReportLoss(0.10)
+	p.ReportLoss(0.10)
+	if p.Bitrate() != 14000 {
+		t.Fatal("stepped down again within the hold-off period")
+	}
+	// Quiet network for a while: climb back, never above the maximum.
+	p.mu.Lock()
+	p.lastLoss = time.Now().Add(-time.Minute)
+	p.lastChange = time.Now().Add(-time.Minute)
+	p.mu.Unlock()
+	p.ReportLoss(0)
+	if p.Bitrate() != 20000 {
+		t.Fatalf("expected recovery to 20000, got %d", p.Bitrate())
+	}
+	p.SetCap(8000)
+	if p.Bitrate() != 8000 {
+		t.Fatalf("server cap not applied: %d", p.Bitrate())
+	}
+}

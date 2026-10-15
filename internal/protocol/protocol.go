@@ -64,6 +64,28 @@ type Device struct {
 	CanWake bool     `json:"canWake,omitempty"`
 	// Pending devices await admin approval and cannot be used yet.
 	Pending bool `json:"pending,omitempty"`
+	// Groups are the names of the groups the device belongs to.
+	Groups []string `json:"groups,omitempty"`
+}
+
+// Policy restricts what a session may do. It is decided by the server and
+// enforced by the agent, because media and input flow peer-to-peer.
+type Policy struct {
+	// ViewOnly sessions receive video/audio but their input is ignored.
+	ViewOnly bool `json:"viewOnly,omitempty"`
+	// Clipboard: "both", "to-remote" (viewer -> PC only), "to-local"
+	// (PC -> viewer only) or "off".
+	Clipboard string `json:"clipboard,omitempty"`
+}
+
+// ClipToRemote reports whether clipboard text may flow viewer -> PC.
+func (p *Policy) ClipToRemote() bool {
+	return p == nil || p.Clipboard == "" || p.Clipboard == "both" || p.Clipboard == "to-remote"
+}
+
+// ClipToLocal reports whether clipboard text may flow PC -> viewer.
+func (p *Policy) ClipToLocal() bool {
+	return p == nil || p.Clipboard == "" || p.Clipboard == "both" || p.Clipboard == "to-local"
 }
 
 // Message is the single envelope used for all signaling traffic. Only the
@@ -79,7 +101,13 @@ type Message struct {
 	// welcome
 	ICEServers []ICEServer `json:"iceServers,omitempty"`
 	ServerName string      `json:"serverName,omitempty"`
-	User       string      `json:"user,omitempty"`
+	// MaxBitrateKbps (server -> agent) caps video bitrate (0 = no cap).
+	MaxBitrateKbps int    `json:"maxBitrateKbps,omitempty"`
+	User           string `json:"user,omitempty"`
+	// UpdateFile/UpdateSHA256 (server -> agent) announce the agent binary
+	// the server offers for this agent's platform.
+	UpdateFile   string `json:"updateFile,omitempty"`
+	UpdateSHA256 string `json:"updateSha256,omitempty"`
 
 	// devices
 	Devices []Device `json:"devices,omitempty"`
@@ -96,6 +124,10 @@ type Message struct {
 	Codecs []string `json:"codecs,omitempty"`
 	// Viewer is the display name of the user (server -> agent, for logs).
 	Viewer string `json:"viewer,omitempty"`
+	// ViewOnly (viewer -> server) requests a watch-only session.
+	ViewOnly bool `json:"viewOnly,omitempty"`
+	// Policy (server -> agent and viewer) applies to the session.
+	Policy *Policy `json:"policy,omitempty"`
 
 	SDP       string          `json:"sdp,omitempty"`
 	Candidate json.RawMessage `json:"candidate,omitempty"`

@@ -46,6 +46,15 @@ type Config struct {
 	Require2FA bool `json:"require2fa"`
 	// ApproveDevices: newly enrolled agents must be approved by an admin.
 	ApproveDevices bool `json:"approveDevices"`
+	// Clipboard policy for all sessions: "both", "to-remote", "to-local",
+	// "off" (data-loss prevention).
+	Clipboard string `json:"clipboard"`
+	// IdleMinutes logs a browser out when it has been closed/inactive this
+	// long (open pages stay signed in).
+	IdleMinutes int `json:"idleMinutes"`
+	// MaxBitrateKbps caps the video bitrate of every agent (0 = no cap),
+	// to protect shared uplinks when many sessions run at once.
+	MaxBitrateKbps int `json:"maxBitrateKbps"`
 
 	// DataDir holds state.json, audit.log and generated certificates.
 	DataDir string `json:"dataDir"`
@@ -66,6 +75,8 @@ func DefaultConfig() Config {
 		RelayPortMax:   50999,
 		SessionHours:   12,
 		ApproveDevices: true,
+		Clipboard:      "both",
+		IdleMinutes:    60,
 		DataDir:        "/var/lib/remotly",
 		AgentsDir:      "/usr/local/share/remotly/agents",
 	}
@@ -90,6 +101,14 @@ func LoadConfig(path string, create bool) (Config, error) {
 	}
 	if cfg.RelayPortMin <= 0 || cfg.RelayPortMax < cfg.RelayPortMin || cfg.RelayPortMax > 65535 {
 		cfg.RelayPortMin, cfg.RelayPortMax = 50000, 50999
+	}
+	switch cfg.Clipboard {
+	case "both", "to-remote", "to-local", "off":
+	default:
+		cfg.Clipboard = "both"
+	}
+	if cfg.IdleMinutes <= 0 {
+		cfg.IdleMinutes = 60
 	}
 	if cfg.SessionHours <= 0 {
 		cfg.SessionHours = 12

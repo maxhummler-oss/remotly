@@ -39,15 +39,21 @@ type Agent struct {
 	api     *webrtc.API
 
 	pmu       sync.Mutex
-	pipelines map[stream.Codec]*stream.Pipeline
+	pipelines map[pipeKey]*stream.Pipeline
+	encoders  map[stream.Codec]string
 	failed    map[stream.Codec]error
+	fps       map[stream.Codec]int
+	capKbps   int
 
 	wsMu sync.Mutex
 	ws   *websocket.Conn
 	macs []string
 
-	mu       sync.Mutex
-	sessions map[string]*session
+	mu            sync.Mutex
+	sessions      map[string]*session
+	updating      bool
+	lastUpdateTry time.Time
+	cancelRun     context.CancelCauseFunc
 }
 
 // New probes ffmpeg/encoders, sets up input and the WebRTC stack. service
@@ -55,7 +61,8 @@ type Agent struct {
 func New(cfg Config, version string, service bool) (*Agent, error) {
 	a := &Agent{
 		cfg: cfg, version: version, service: service, sessions: map[string]*session{},
-		pipelines: map[stream.Codec]*stream.Pipeline{}, failed: map[stream.Codec]error{},
+		pipelines: map[pipeKey]*stream.Pipeline{}, encoders: map[stream.Codec]string{},
+		failed: map[stream.Codec]error{}, fps: map[stream.Codec]int{},
 	}
 
 	opts := cfg.StreamOptions()
@@ -84,9 +91,9 @@ func New(cfg Config, version string, service bool) (*Agent, error) {
 	}
 	// H.264 is prepared up front (it is what nearly every viewer uses);
 	// other codecs are set up on first demand.
-	if _, err := a.pipelineFor(stream.H264); err != nil {
+	if _, err := a.pipelineFor(stream.H264, cfg.Display); err != nil {
 		log.Printf("H.264 unavailable: %v", err)
-		if _, err := a.pipelineFor(stream.VP8); err != nil {
+		if _, err := a.pipelineFor(stream.VP8, cfg.Display); err != nil {
 			return nil, err
 		}
 	}
@@ -94,9 +101,9 @@ func New(cfg Config, version string, service bool) (*Agent, error) {
 
 	if a.sys != nil {
 		a.sys.SetCallbacks(input.Callbacks{
-			Cursor: func(css string) { a.broadcast(map[string]any{"t": "cursor", "c": css}) },
+			Cursor: func(css string) { a.broadcast(map[string]any{"t": "cursor", "c": css}, nil) },
 			Clipboard: func(text string) {
-				a.broadcast(map[string]any{"t": "clip", "text": text})
+				a.broadcast(map[string]any{"t": "clip", "text": text}, func(s *session) bool { return s.policy.ClipToLocal() })
 			},
 			Desktop: func(name string) {
 				// Desktop Duplication cannot follow a desktop switch:
@@ -106,7 +113,7 @@ func New(cfg Config, version string, service bool) (*Agent, error) {
 					p.Restart()
 				}
 				a.pmu.Unlock()
-				a.broadcast(map[string]any{"t": "desktop", "name": name})
+				a.broadcast(map[string]any{"t": "desktop", "name": name}, nil)
 				a.sendInfo()
 			},
 		})
@@ -118,34 +125,54 @@ func New(cfg Config, version string, service bool) (*Agent, error) {
 	return a, nil
 }
 
-// pipelineFor returns (creating on first use) the pipeline for codec.
-func (a *Agent) pipelineFor(codec stream.Codec) (*stream.Pipeline, error) {
+type pipeKey struct {
+	codec   stream.Codec
+	display int
+}
+
+// pipelineFor returns (creating on first use) the pipeline for a codec and
+// display. Viewers watching the same display share one capture process.
+func (a *Agent) pipelineFor(codec stream.Codec, display int) (*stream.Pipeline, error) {
 	a.pmu.Lock()
 	defer a.pmu.Unlock()
-	if p := a.pipelines[codec]; p != nil {
+	key := pipeKey{codec, display}
+	if p := a.pipelines[key]; p != nil {
 		return p, nil
 	}
 	if err := a.failed[codec]; err != nil {
 		return nil, err
 	}
 	opts := a.opts
-	if opts.FPS == 0 {
-		opts.FPS = 60
+	opts.Display = display
+	enc, ok := a.encoders[codec]
+	if !ok {
+		probe := opts
+		if probe.FPS == 0 {
+			probe.FPS = 60
+		}
+		var err error
+		if enc, err = stream.SelectEncoder(probe, codec, log.Printf); err != nil {
+			a.failed[codec] = err
+			return nil, err
+		}
+		a.encoders[codec] = enc
+		fps := a.opts.FPS
+		if fps == 0 {
+			fps = 60
+			if runtime.GOOS == "windows" && stream.IsHardware(enc) {
+				// Capturing at 120 fps halves the time a screen update
+				// waits to be grabbed, even on a 60 Hz display; hardware
+				// encoders handle the (mostly duplicate) frames for free.
+				fps = 120
+			}
+		}
+		a.fps[codec] = fps
 	}
-	enc, err := stream.SelectEncoder(opts, codec, log.Printf)
-	if err != nil {
-		a.failed[codec] = err
-		return nil, err
-	}
-	if a.opts.FPS == 0 && runtime.GOOS == "windows" && stream.IsHardware(enc) {
-		// Capturing at 120 fps halves the time a screen update waits to be
-		// grabbed, even on a 60 Hz display. Hardware encoders handle the
-		// (mostly duplicate) frames at no measurable cost.
-		opts.FPS = 120
-	}
-	log.Printf("%s pipeline: %s at %d fps", codec, enc, opts.FPS)
+	opts.FPS = a.fps[codec]
+	log.Printf("%s pipeline for display %d: %s at %d fps, %d kbit/s", codec, display, enc, opts.FPS, opts.BitrateKbps)
 	p := stream.NewPipeline(opts, enc)
-	a.pipelines[codec] = p
+	p.SetCap(a.capKbps)
+	a.pipelines[key] = p
 	return p, nil
 }
 
@@ -153,13 +180,37 @@ func (a *Agent) pipelineFor(codec stream.Codec) (*stream.Pipeline, error) {
 func (a *Agent) primary() *stream.Pipeline {
 	a.pmu.Lock()
 	defer a.pmu.Unlock()
-	if p := a.pipelines[stream.H264]; p != nil {
+	if p := a.pipelines[pipeKey{stream.H264, a.cfg.Display}]; p != nil {
 		return p
 	}
 	for _, p := range a.pipelines {
 		return p
 	}
 	return nil
+}
+
+// displays returns how many displays a viewer can switch between. With
+// whole-desktop capture (gdigrab) there is only one "display".
+func (a *Agent) displays() int {
+	p := a.primary()
+	if a.sys == nil || p == nil {
+		return 1
+	}
+	switch p.Capture().Method {
+	case "ddagrab", "avfoundation":
+		return max(1, a.sys.Displays())
+	}
+	return 1
+}
+
+// setCap applies the server's bitrate cap to all pipelines.
+func (a *Agent) setCap(kbps int) {
+	a.pmu.Lock()
+	defer a.pmu.Unlock()
+	a.capKbps = kbps
+	for _, p := range a.pipelines {
+		p.SetCap(kbps)
+	}
 }
 
 // h264Fmtp advertises Constrained Baseline, which every browser decodes
@@ -215,13 +266,19 @@ const opusFmtp = "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1"
 
 // Run connects to the server and serves sessions until ctx is cancelled,
 // reconnecting with backoff whenever the connection drops.
-func (a *Agent) Run(ctx context.Context) error {
+func (a *Agent) Run(parent context.Context) error {
+	ctx, cancel := context.WithCancelCause(parent)
+	defer cancel(nil)
+	a.cancelRun = cancel
 	backoff := time.Second
 	for {
 		started := time.Now()
 		err := a.connectOnce(ctx)
 		a.closeAllSessions("server connection lost")
 		if ctx.Err() != nil {
+			if errors.Is(context.Cause(ctx), ErrUpdated) {
+				return ErrUpdated
+			}
 			return nil
 		}
 		var fatal *fatalError
@@ -324,6 +381,8 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 		}
 		return errors.New(welcome.Reason)
 	}
+	a.setCap(welcome.MaxBitrateKbps)
+	go a.maybeUpdate(ctx, welcome.UpdateFile, welcome.UpdateSHA256)
 	conn.SetPingHandler(func(data string) error {
 		a.wsMu.Lock()
 		defer a.wsMu.Unlock()
@@ -422,13 +481,16 @@ func (a *Agent) session(id string) *session {
 	return a.sessions[id]
 }
 
-// broadcast sends a control message to every connected viewer.
-func (a *Agent) broadcast(v any) {
+// broadcast sends a control message to every connected viewer that
+// passes the filter (nil = all).
+func (a *Agent) broadcast(v any, filter func(*session) bool) {
 	data, _ := json.Marshal(v)
 	a.mu.Lock()
 	list := make([]*session, 0, len(a.sessions))
 	for _, s := range a.sessions {
-		list = append(list, s)
+		if filter == nil || filter(s) {
+			list = append(list, s)
+		}
 	}
 	a.mu.Unlock()
 	for _, s := range list {

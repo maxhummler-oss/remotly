@@ -58,6 +58,8 @@ type platform interface {
 	setClipboard(text string)
 	keepAwake(on bool)
 	sendSAS()
+	// displays returns the number of attached displays.
+	displays() int
 }
 
 // Options configures the system controller.
@@ -124,6 +126,9 @@ func (s *System) Cursor() string {
 	defer s.mu.Unlock()
 	return s.lastCur
 }
+
+// Displays returns the number of attached displays.
+func (s *System) Displays() int { return s.p.displays() }
 
 // SessionStarted/SessionEnded keep the machine and display awake while
 // someone is connected.
@@ -220,14 +225,19 @@ func (s *System) watch() {
 // so a disconnect only releases that viewer's keys.
 type Injector struct {
 	sys     *System
+	mapping func() Mapping
 	mu      sync.Mutex
 	keys    map[string]bool
 	buttons map[int]bool
 }
 
-// NewInjector creates an injector for one session.
-func (s *System) NewInjector() *Injector {
-	return &Injector{sys: s, keys: map[string]bool{}, buttons: map[int]bool{}}
+// NewInjector creates an injector for one session. mapping describes the
+// screen area the session's video shows (nil = the system default).
+func (s *System) NewInjector(mapping func() Mapping) *Injector {
+	if mapping == nil {
+		mapping = s.opts.Mapping
+	}
+	return &Injector{sys: s, mapping: mapping, keys: map[string]bool{}, buttons: map[int]bool{}}
 }
 
 // HandleJSON decodes and applies one event.
@@ -247,7 +257,7 @@ func (in *Injector) Handle(ev Event) {
 	defer in.mu.Unlock()
 	switch ev.T {
 	case "m":
-		p.moveAbs(in.sys.opts.Mapping(), clamp01(ev.X), clamp01(ev.Y))
+		p.moveAbs(in.mapping(), clamp01(ev.X), clamp01(ev.Y))
 	case "r":
 		p.moveRel(clampInt(ev.DX), clampInt(ev.DY))
 	case "b":

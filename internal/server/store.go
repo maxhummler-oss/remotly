@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -28,6 +29,7 @@ type User struct {
 	Admin        bool      `json:"admin"`
 	Disabled     bool      `json:"disabled,omitempty"`
 	Devices      []string  `json:"devices"` // device IDs this user may control
+	Groups       []string  `json:"groups"`  // group IDs this user may control
 	TOTPSecret   string    `json:"totpSecret,omitempty"`
 	Created      time.Time `json:"created"`
 	LastLogin    time.Time `json:"lastLogin,omitempty"`
@@ -50,9 +52,18 @@ type DeviceRecord struct {
 	LastSeen time.Time `json:"lastSeen,omitempty"`
 }
 
+// Group is a named set of devices (a department, a rack, a room). Users
+// assigned to a group may control all of its devices.
+type Group struct {
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Devices []string `json:"devices"`
+}
+
 type state struct {
 	Users      map[string]*User         `json:"users"`
 	Devices    map[string]*DeviceRecord `json:"devices"`
+	Groups     map[string]*Group        `json:"groups"`
 	EnrollKey  string                   `json:"enrollKey"`
 	TURNSecret string                   `json:"turnSecret"`
 }
@@ -61,10 +72,27 @@ type state struct {
 // It reloads the file when it was modified externally, so the CLI can
 // manage users while the server is running.
 type Store struct {
-	path    string
-	mu      sync.Mutex
-	st      state
-	modTime time.Time
+	path      string
+	mu        sync.Mutex
+	st        state
+	modTime   time.Time
+	lastCheck time.Time
+	flushing  bool // a deferred save is scheduled
+}
+
+// saveSoon persists non-critical changes (last seen, last login) at most
+// once per second instead of on every change. Caller holds mu.
+func (s *Store) saveSoon() {
+	if s.flushing {
+		return
+	}
+	s.flushing = true
+	time.AfterFunc(time.Second, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.flushing = false
+		s.save()
+	})
 }
 
 var userNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -76,7 +104,7 @@ func OpenStore(path string) (*Store, error) {
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
-		s.st = state{Users: map[string]*User{}, Devices: map[string]*DeviceRecord{}}
+		s.st = state{Users: map[string]*User{}, Devices: map[string]*DeviceRecord{}, Groups: map[string]*Group{}}
 	}
 	changed := false
 	if s.st.EnrollKey == "" {
@@ -114,6 +142,9 @@ func (s *Store) load() error {
 	if st.Devices == nil {
 		st.Devices = map[string]*DeviceRecord{}
 	}
+	if st.Groups == nil {
+		st.Groups = map[string]*Group{}
+	}
 	s.st = st
 	s.modTime = info.ModTime()
 	return nil
@@ -121,6 +152,12 @@ func (s *Store) load() error {
 
 // refresh reloads the file if another process changed it. Caller holds mu.
 func (s *Store) refresh() {
+	// At most one stat per second: reads happen for every device-list
+	// broadcast, and with hundreds of viewers that adds up.
+	if time.Since(s.lastCheck) < time.Second {
+		return
+	}
+	s.lastCheck = time.Now()
 	if info, err := os.Stat(s.path); err == nil && !info.ModTime().Equal(s.modTime) {
 		s.load()
 	}
@@ -167,10 +204,39 @@ func (s *Store) view(fn func(st *state)) {
 // ---------------------------------------------------------------------------
 // Users
 
-// ValidatePassword enforces a minimal password policy.
-func ValidatePassword(pw string) error {
-	if len(pw) < 10 {
+// commonPasswords are rejected outright (lowercased, digits/symbols at the
+// end stripped before comparison).
+var commonPasswords = map[string]bool{
+	"password": true, "passwort": true, "qwertz": true, "qwerty": true, "qwertzuiop": true,
+	"asdfghjkl": true, "letmein": true, "welcome": true, "willkommen": true, "admin": true,
+	"administrator": true, "sommer": true, "winter": true, "fruehling": true, "herbst": true,
+	"hallo": true, "geheim": true, "remotly": true, "test": true, "changeme": true, "iloveyou": true,
+}
+
+// ValidatePassword enforces the password policy: at least 10 characters,
+// not a common password, not derived from the user name.
+func ValidatePassword(pw, user string) error {
+	if len([]rune(pw)) < 10 {
 		return errors.New("Passwort muss mindestens 10 Zeichen lang sein")
+	}
+	lower := strings.ToLower(pw)
+	base := strings.TrimRightFunc(lower, func(r rune) bool { return !unicode.IsLetter(r) })
+	if commonPasswords[base] || strings.Trim(lower, "0123456789") == "" {
+		return errors.New("Dieses Passwort ist zu leicht zu erraten")
+	}
+	if user != "" {
+		for _, part := range append([]string{strings.ToLower(user)}, strings.FieldsFunc(strings.ToLower(user), func(r rune) bool { return r == '.' || r == '_' || r == '-' })...) {
+			if len(part) >= 3 && strings.Contains(lower, part) {
+				return errors.New("Passwort darf den Benutzernamen nicht enthalten")
+			}
+		}
+	}
+	distinct := map[rune]bool{}
+	for _, r := range pw {
+		distinct[r] = true
+	}
+	if len(distinct) < 5 {
+		return errors.New("Passwort ist zu einfach (zu wenige verschiedene Zeichen)")
 	}
 	return nil
 }
@@ -201,12 +267,12 @@ func (s *Store) Authenticate(name, password string) (User, bool) {
 	if bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil || u.Disabled {
 		return User{}, false
 	}
-	s.update(func(st *state) error {
-		if p := st.Users[name]; p != nil {
-			p.LastLogin = time.Now()
-		}
-		return nil
-	})
+	s.mu.Lock()
+	if p := s.st.Users[name]; p != nil {
+		p.LastLogin = time.Now()
+		s.saveSoon()
+	}
+	s.mu.Unlock()
 	return u, true
 }
 
@@ -218,6 +284,7 @@ func (s *Store) GetUser(name string) (User, bool) {
 		if p := st.Users[name]; p != nil {
 			u, ok = *p, true
 			u.Devices = append([]string{}, p.Devices...)
+			u.Groups = append([]string{}, p.Groups...)
 		}
 	})
 	return u, ok
@@ -230,6 +297,7 @@ func (s *Store) Users() []User {
 		for _, u := range st.Users {
 			c := *u
 			c.Devices = append([]string{}, u.Devices...)
+			c.Groups = append([]string{}, u.Groups...)
 			list = append(list, c)
 		}
 	})
@@ -250,7 +318,7 @@ func (s *Store) AddUser(name, display, password string, admin bool) error {
 	if !userNameRE.MatchString(name) {
 		return errors.New("ungültiger Benutzername (a-z, 0-9, . _ -)")
 	}
-	if err := ValidatePassword(password); err != nil {
+	if err := ValidatePassword(password, name); err != nil {
 		return err
 	}
 	hash, err := hashPassword(password)
@@ -264,7 +332,7 @@ func (s *Store) AddUser(name, display, password string, admin bool) error {
 		if st.Users[name] != nil {
 			return errors.New("Benutzer existiert bereits")
 		}
-		st.Users[name] = &User{Name: name, DisplayName: display, PasswordHash: hash, Admin: admin, Devices: []string{}, Created: time.Now()}
+		st.Users[name] = &User{Name: name, DisplayName: display, PasswordHash: hash, Admin: admin, Devices: []string{}, Groups: []string{}, Created: time.Now()}
 		return nil
 	})
 }
@@ -276,6 +344,7 @@ type UserPatch struct {
 	Admin       *bool     `json:"admin"`
 	Disabled    *bool     `json:"disabled"`
 	Devices     *[]string `json:"devices"`
+	Groups      *[]string `json:"groups"`
 	ResetTOTP   bool      `json:"resetTotp"`
 }
 
@@ -283,7 +352,7 @@ type UserPatch struct {
 func (s *Store) UpdateUser(name string, p UserPatch) error {
 	var hash string
 	if p.Password != nil {
-		if err := ValidatePassword(*p.Password); err != nil {
+		if err := ValidatePassword(*p.Password, name); err != nil {
 			return err
 		}
 		var err error
@@ -325,6 +394,15 @@ func (s *Store) UpdateUser(name string, p UserPatch) error {
 				}
 			}
 			u.Devices = ids
+		}
+		if p.Groups != nil {
+			ids := []string{}
+			for _, id := range *p.Groups {
+				if st.Groups[id] != nil {
+					ids = append(ids, id)
+				}
+			}
+			u.Groups = ids
 		}
 		return nil
 	})
@@ -415,18 +493,29 @@ func (s *Store) AuthenticateDevice(id, secret string) (DeviceRecord, bool) {
 	return d, ok
 }
 
-// DeviceSeen updates the information an agent reports on connect.
+// DeviceSeen updates the information an agent reports on connect. The
+// file is only rewritten when something changed (or LastSeen is stale), so
+// hundreds of agents reconnecting after a server restart do not cause
+// hundreds of full database writes.
 func (s *Store) DeviceSeen(id, hostname, osName, arch, ip string, macs []string) {
-	s.update(func(st *state) error {
-		if d := st.Devices[id]; d != nil {
-			d.Hostname, d.OS, d.Arch, d.LastIP = hostname, osName, arch, ip
-			if len(macs) > 0 {
-				d.MACs = macs
-			}
-			d.LastSeen = time.Now()
-		}
-		return nil
-	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refresh()
+	d := s.st.Devices[id]
+	if d == nil {
+		return
+	}
+	changed := d.Hostname != hostname || d.OS != osName || d.Arch != arch || d.LastIP != ip ||
+		(len(macs) > 0 && strings.Join(macs, ",") != strings.Join(d.MACs, ","))
+	d.Hostname, d.OS, d.Arch, d.LastIP = hostname, osName, arch, ip
+	if len(macs) > 0 {
+		d.MACs = macs
+	}
+	stale := time.Since(d.LastSeen) > time.Hour
+	d.LastSeen = time.Now()
+	if changed || stale {
+		s.saveSoon()
+	}
 }
 
 // GetDevice returns a copy of a device record.
@@ -501,29 +590,128 @@ func (s *Store) DeleteDevice(id string) error {
 		}
 		delete(st.Devices, id)
 		for _, u := range st.Users {
-			kept := u.Devices[:0]
-			for _, d := range u.Devices {
-				if d != id {
-					kept = append(kept, d)
-				}
-			}
-			u.Devices = kept
+			u.Devices = without(u.Devices, id)
+		}
+		for _, g := range st.Groups {
+			g.Devices = without(g.Devices, id)
 		}
 		return nil
 	})
 }
 
-// CanAccess reports whether user may control device.
-func (u *User) CanAccess(deviceID string) bool {
-	if u.Admin {
-		return true
-	}
-	for _, d := range u.Devices {
-		if d == deviceID {
-			return true
+func without(list []string, id string) []string {
+	kept := []string{}
+	for _, v := range list {
+		if v != id {
+			kept = append(kept, v)
 		}
 	}
-	return false
+	return kept
+}
+
+// Access returns the set of devices u may control (all=true for admins),
+// resolving direct assignments and group memberships.
+func (s *Store) Access(u User) (all bool, set map[string]bool) {
+	if u.Admin {
+		return true, nil
+	}
+	set = map[string]bool{}
+	for _, d := range u.Devices {
+		set[d] = true
+	}
+	s.view(func(st *state) {
+		for _, gid := range u.Groups {
+			if g := st.Groups[gid]; g != nil {
+				for _, d := range g.Devices {
+					set[d] = true
+				}
+			}
+		}
+	})
+	return false, set
+}
+
+// CanAccess reports whether u may control the device.
+func (s *Store) CanAccess(u User, deviceID string) bool {
+	all, set := s.Access(u)
+	return all || set[deviceID]
+}
+
+// ---------------------------------------------------------------------------
+// Groups
+
+// Groups returns all groups sorted by name.
+func (s *Store) Groups() []Group {
+	var list []Group
+	s.view(func(st *state) {
+		for _, g := range st.Groups {
+			c := *g
+			c.Devices = append([]string{}, g.Devices...)
+			list = append(list, c)
+		}
+	})
+	sort.Slice(list, func(i, j int) bool { return strings.ToLower(list[i].Name) < strings.ToLower(list[j].Name) })
+	return list
+}
+
+// GroupNames maps device ID -> names of its groups.
+func (s *Store) GroupNames() map[string][]string {
+	out := map[string][]string{}
+	for _, g := range s.Groups() {
+		for _, d := range g.Devices {
+			out[d] = append(out[d], g.Name)
+		}
+	}
+	return out
+}
+
+// SaveGroup creates (empty id) or updates a group.
+func (s *Store) SaveGroup(id, name string, devices []string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 64 {
+		return "", errors.New("ungültiger Gruppenname")
+	}
+	err := s.update(func(st *state) error {
+		for _, g := range st.Groups {
+			if g.ID != id && strings.EqualFold(g.Name, name) {
+				return errors.New("Gruppe existiert bereits")
+			}
+		}
+		if id == "" {
+			id = randomHex(6)
+			st.Groups[id] = &Group{ID: id}
+		}
+		g := st.Groups[id]
+		if g == nil {
+			return errors.New("Gruppe nicht gefunden")
+		}
+		g.Name = name
+		if devices != nil {
+			ids := []string{}
+			for _, d := range devices {
+				if st.Devices[d] != nil {
+					ids = append(ids, d)
+				}
+			}
+			g.Devices = ids
+		}
+		return nil
+	})
+	return id, err
+}
+
+// DeleteGroup removes a group and its user assignments.
+func (s *Store) DeleteGroup(id string) error {
+	return s.update(func(st *state) error {
+		if st.Groups[id] == nil {
+			return errors.New("Gruppe nicht gefunden")
+		}
+		delete(st.Groups, id)
+		for _, u := range st.Users {
+			u.Groups = without(u.Groups, id)
+		}
+		return nil
+	})
 }
 
 func hashSecret(secret string) string {

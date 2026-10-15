@@ -11,11 +11,13 @@ import (
 const sessionCookie = "remotly_sid"
 
 type webSession struct {
-	id      string
-	user    string
-	ip      string
-	created time.Time
-	expires time.Time
+	id       string
+	user     string
+	ip       string
+	created  time.Time
+	expires  time.Time
+	lastSeen time.Time
+	open     int // connected viewer pages (WebSockets)
 }
 
 type failure struct {
@@ -29,11 +31,12 @@ type auth struct {
 	mu       sync.Mutex
 	sessions map[string]*webSession
 	ttl      time.Duration
+	idle     time.Duration
 	failures map[string]*failure // keyed by "ip:<addr>" and "user:<name>"
 }
 
-func newAuth(ttl time.Duration) *auth {
-	a := &auth{sessions: map[string]*webSession{}, ttl: ttl, failures: map[string]*failure{}}
+func newAuth(ttl, idle time.Duration) *auth {
+	a := &auth{sessions: map[string]*webSession{}, ttl: ttl, idle: idle, failures: map[string]*failure{}}
 	go a.gc()
 	return a
 }
@@ -43,7 +46,7 @@ func (a *auth) gc() {
 		a.mu.Lock()
 		now := time.Now()
 		for id, s := range a.sessions {
-			if now.After(s.expires) {
+			if a.expired(s, now) {
 				delete(a.sessions, id)
 			}
 		}
@@ -100,22 +103,44 @@ func (a *auth) succeed(keys ...string) {
 }
 
 func (a *auth) create(user, ip string) *webSession {
-	s := &webSession{id: randomString(32), user: user, ip: ip, created: time.Now(), expires: time.Now().Add(a.ttl)}
+	now := time.Now()
+	s := &webSession{id: randomString(32), user: user, ip: ip, created: now, expires: now.Add(a.ttl), lastSeen: now}
 	a.mu.Lock()
 	a.sessions[s.id] = s
 	a.mu.Unlock()
 	return s
 }
 
+// expired: past the absolute lifetime, or idle (no open page and no
+// request) for longer than the idle timeout. Caller holds mu.
+func (a *auth) expired(s *webSession, now time.Time) bool {
+	if now.After(s.expires) {
+		return true
+	}
+	return a.idle > 0 && s.open == 0 && now.Sub(s.lastSeen) > a.idle
+}
+
 func (a *auth) get(id string) *webSession {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s := a.sessions[id]
-	if s == nil || time.Now().After(s.expires) {
+	now := time.Now()
+	if s == nil || a.expired(s, now) {
 		delete(a.sessions, id)
 		return nil
 	}
+	s.lastSeen = now
 	return s
+}
+
+// attach/detach count open viewer pages; an open page is never idle.
+func (a *auth) attach(id string, delta int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if s := a.sessions[id]; s != nil {
+		s.open += delta
+		s.lastSeen = time.Now()
+	}
 }
 
 func (a *auth) remove(id string) {

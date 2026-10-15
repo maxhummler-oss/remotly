@@ -4,6 +4,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,17 +49,19 @@ type Server struct {
 
 	turn     *turn.Server
 	upgrader websocket.Upgrader
+	dirty    chan struct{}
 }
 
 type client struct {
 	srv  *Server
 	conn *websocket.Conn
-	send chan []byte
+	send chan outMsg
 	addr string
 
 	// viewer
-	user    User
-	loginID string
+	user        User
+	loginID     string
+	lastDevices []byte // last device list sent (viewers; touched by sendDevices only)
 	// agent
 	deviceID string
 	info     protocol.AgentInfo
@@ -81,13 +85,14 @@ func New(cfg Config, version string, store *Store) *Server {
 		cfg:      cfg,
 		version:  version,
 		store:    store,
-		auth:     newAuth(time.Duration(cfg.SessionHours) * time.Hour),
+		auth:     newAuth(time.Duration(cfg.SessionHours)*time.Hour, time.Duration(cfg.IdleMinutes)*time.Minute),
 		totp:     newTOTPGuard(),
 		audit:    NewAudit(cfg.DataDir + "/audit.log"),
 		agents:   map[string]*client{},
 		viewers:  map[*client]struct{}{},
 		sessions: map[string]*session{},
-		upgrader: websocket.Upgrader{ReadBufferSize: 16 << 10, WriteBufferSize: 16 << 10},
+		upgrader: websocket.Upgrader{ReadBufferSize: 16 << 10, WriteBufferSize: 16 << 10, EnableCompression: true},
+		dirty:    make(chan struct{}, 1),
 	}
 }
 
@@ -96,6 +101,8 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.store.UserCount() == 0 {
 		log.Printf("no users yet: create the first admin with 'remotly-server user add <name> --admin'")
 	}
+
+	go s.broadcastLoop(ctx)
 
 	t, err := startTURN(s.cfg, s.store.TURNSecret())
 	if err != nil {
@@ -265,7 +272,7 @@ func (s *Server) newClient(w http.ResponseWriter, r *http.Request) *client {
 	if err != nil {
 		return nil
 	}
-	return &client{srv: s, conn: conn, send: make(chan []byte, 256), addr: remoteIP(r), done: make(chan struct{})}
+	return &client{srv: s, conn: conn, send: make(chan outMsg, 256), addr: remoteIP(r), done: make(chan struct{})}
 }
 
 // handleViewerWS serves browsers. Authentication is the login cookie; the
@@ -292,6 +299,8 @@ func (s *Server) handleViewerWS(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.viewers[c] = struct{}{}
 	s.mu.Unlock()
+	s.auth.attach(ws.id, 1)
+	defer s.auth.attach(ws.id, -1)
 
 	go c.writeLoop()
 	c.post(protocol.Message{Type: protocol.TypeWelcome, ServerName: s.cfg.Name, User: u.DisplayName})
@@ -339,7 +348,15 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	log.Printf("agent online: %q (%s/%s, %s, %s) from %s", dev.Name, c.info.OS, c.info.Arch, c.info.Encoder, c.info.Capture, ip)
 
 	go c.writeLoop()
-	c.post(protocol.Message{Type: protocol.TypeWelcome, ServerName: s.cfg.Name})
+	welcome := protocol.Message{Type: protocol.TypeWelcome, ServerName: s.cfg.Name, MaxBitrateKbps: s.cfg.MaxBitrateKbps}
+	file := "remotly-agent-" + c.info.OS + "-" + c.info.Arch
+	if c.info.OS == "windows" {
+		file += ".exe"
+	}
+	if hash, ok := s.agentHashes()[file]; ok {
+		welcome.UpdateFile, welcome.UpdateSHA256 = file, hash
+	}
+	c.post(welcome)
 	s.broadcastDevices()
 	c.readLoop()
 }
@@ -369,9 +386,15 @@ func (c *client) writeLoop() {
 	defer ticker.Stop()
 	for {
 		select {
-		case data := <-c.send:
+		case m := <-c.send:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			var err error
+			if m.prep != nil {
+				err = c.conn.WritePreparedMessage(m.prep)
+			} else {
+				err = c.conn.WriteMessage(websocket.TextMessage, m.data)
+			}
+			if err != nil {
 				c.close()
 				return
 			}
@@ -392,8 +415,21 @@ func (c *client) post(msg protocol.Message) {
 	if err != nil {
 		return
 	}
+	c.postRaw(data)
+}
+
+// outMsg is a queued WebSocket message: raw bytes, or a message prepared
+// (and compressed) once for many recipients.
+type outMsg struct {
+	data []byte
+	prep *websocket.PreparedMessage
+}
+
+func (c *client) postRaw(data []byte) { c.enqueue(outMsg{data: data}) }
+
+func (c *client) enqueue(m outMsg) {
 	select {
-	case c.send <- data:
+	case c.send <- m:
 	case <-c.done:
 	default:
 		log.Printf("%s: send buffer full, dropping connection", c.addr)
@@ -449,29 +485,45 @@ func (s *Server) unregister(c *client) {
 // ---------------------------------------------------------------------------
 // Device lists
 
-func (s *Server) devicesFor(u User) []protocol.Device {
-	records := s.store.Devices()
+// deviceSnapshot is computed once per broadcast and filtered per viewer.
+type deviceSnapshot struct {
+	records []DeviceRecord
+	groups  map[string][]string
+	inUse   map[string][]string
+	online  map[string]string // device ID -> encoder
+}
+
+func (s *Server) snapshot() deviceSnapshot {
+	snap := deviceSnapshot{records: s.store.Devices(), groups: s.store.GroupNames(),
+		inUse: map[string][]string{}, online: map[string]string{}}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	users := map[string][]string{}
 	for _, sess := range s.sessions {
 		name := sess.viewer.user.DisplayName
-		if !slices.Contains(users[sess.agent.deviceID], name) {
-			users[sess.agent.deviceID] = append(users[sess.agent.deviceID], name)
+		if !slices.Contains(snap.inUse[sess.agent.deviceID], name) {
+			snap.inUse[sess.agent.deviceID] = append(snap.inUse[sess.agent.deviceID], name)
 		}
 	}
+	for id, a := range s.agents {
+		snap.online[id] = a.info.Encoder
+	}
+	return snap
+}
+
+func (s *Server) devicesFrom(snap deviceSnapshot, u User) []protocol.Device {
+	all, allowed := s.store.Access(u)
 	list := []protocol.Device{}
-	for _, d := range records {
-		if !u.CanAccess(d.ID) {
+	for _, d := range snap.records {
+		if !all && !allowed[d.ID] {
 			continue
 		}
 		if d.Pending && !u.Admin {
 			continue
 		}
-		dev := protocol.Device{ID: d.ID, Name: d.Name, OS: d.OS, InUseBy: users[d.ID], Pending: d.Pending}
-		if a := s.agents[d.ID]; a != nil {
+		dev := protocol.Device{ID: d.ID, Name: d.Name, OS: d.OS, InUseBy: snap.inUse[d.ID], Pending: d.Pending, Groups: snap.groups[d.ID]}
+		if enc, ok := snap.online[d.ID]; ok {
 			dev.Online = true
-			dev.Encoder = a.info.Encoder
+			dev.Encoder = enc
 		} else {
 			dev.CanWake = len(d.MACs) > 0
 		}
@@ -481,13 +533,51 @@ func (s *Server) devicesFor(u User) []protocol.Device {
 	return list
 }
 
+func (s *Server) devicesFor(u User) []protocol.Device {
+	return s.devicesFrom(s.snapshot(), u)
+}
+
+// broadcastDevices schedules a device-list update for all viewers. Bursts
+// (e.g. 50 agents reconnecting after a server restart) are coalesced into a
+// single broadcast.
 func (s *Server) broadcastDevices() {
+	select {
+	case s.dirty <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) broadcastLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.dirty:
+		}
+		time.Sleep(150 * time.Millisecond)
+		select { // absorb what arrived while waiting
+		case <-s.dirty:
+		default:
+		}
+		s.sendDevices()
+	}
+}
+
+func (s *Server) sendDevices() {
+	snap := s.snapshot()
 	s.mu.Lock()
 	viewers := make([]*client, 0, len(s.viewers))
 	for v := range s.viewers {
 		viewers = append(viewers, v)
 	}
 	s.mu.Unlock()
+	// Viewers with identical rights (all admins, a whole department via
+	// its group) share one serialized list.
+	type entry struct {
+		data []byte
+		prep *websocket.PreparedMessage
+	}
+	cache := map[string]entry{}
 	for _, v := range viewers {
 		// Permissions may have changed: always use the stored user.
 		u, ok := s.store.GetUser(v.userName())
@@ -497,8 +587,44 @@ func (s *Server) broadcastDevices() {
 		s.mu.Lock()
 		v.user = u
 		s.mu.Unlock()
-		v.post(protocol.Message{Type: protocol.TypeDevices, Devices: s.devicesFor(u)})
+		key := accessKey(s.store, u)
+		e, ok := cache[key]
+		if !ok {
+			data, err := json.Marshal(protocol.Message{Type: protocol.TypeDevices, Devices: s.devicesFrom(snap, u)})
+			if err != nil {
+				continue
+			}
+			// Prepared once: serialized and compressed a single time for
+			// every viewer that receives this exact list.
+			prep, _ := websocket.NewPreparedMessage(websocket.TextMessage, data)
+			e = entry{data, prep}
+			cache[key] = e
+		}
+		// Unchanged lists are not resent.
+		if bytes.Equal(e.data, v.lastDevices) {
+			continue
+		}
+		v.lastDevices = e.data
+		if e.prep != nil {
+			v.enqueue(outMsg{prep: e.prep})
+		} else {
+			v.postRaw(e.data)
+		}
 	}
+}
+
+// accessKey identifies a user's effective rights for list caching.
+func accessKey(st *Store, u User) string {
+	all, set := st.Access(u)
+	if all {
+		return "*"
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ",")
 }
 
 func (c *client) userName() string {
@@ -556,7 +682,7 @@ func (s *Server) connect(c *client, msg protocol.Message) {
 		c.post(protocol.Message{Type: protocol.TypeError, Reason: "Gerät wartet auf Freigabe durch einen Administrator"})
 		return
 	}
-	if !u.CanAccess(msg.Target) {
+	if !s.store.CanAccess(u, msg.Target) {
 		s.audit.Log(AuditEntry{Event: "session.denied", User: u.Name, Device: dev.Name, IP: c.addr, Detail: "no permission " + msg.Target})
 		c.post(protocol.Message{Type: protocol.TypeError, Reason: "Keine Berechtigung für dieses Gerät"})
 		return
@@ -611,12 +737,18 @@ func (s *Server) connect(c *client, msg protocol.Message) {
 		s.logSessionEnd(old, reason)
 	}
 
+	// Joining someone else's session is always watch-only; admins may also
+	// ask for a watch-only session explicitly.
+	policy := &protocol.Policy{Clipboard: s.cfg.Clipboard, ViewOnly: msg.ViewOnly || len(watched) > 0}
+	if policy.ViewOnly {
+		policy.Clipboard = "off"
+	}
 	for _, w := range watched {
-		w.viewer.post(protocol.Message{Type: protocol.TypeNotice, Reason: "Administrator " + u.DisplayName + " ist dieser Sitzung beigetreten"})
+		w.viewer.post(protocol.Message{Type: protocol.TypeNotice, Reason: "Administrator " + u.DisplayName + " sieht deinen Bildschirm (nur Ansicht)"})
 	}
 	detail := sess.id
-	if len(watched) > 0 {
-		detail += " (shadow)"
+	if policy.ViewOnly {
+		detail += " (view-only)"
 	}
 	s.audit.Log(AuditEntry{Event: "session.start", User: u.Name, Device: dev.Name, IP: c.addr, Detail: detail})
 	c.post(protocol.Message{
@@ -624,6 +756,7 @@ func (s *Server) connect(c *client, msg protocol.Message) {
 		Session:    sess.id,
 		Target:     msg.Target,
 		ICEServers: s.iceServers("u-" + u.Name),
+		Policy:     policy,
 	})
 	agent.post(protocol.Message{
 		Type:       protocol.TypeConnect,
@@ -631,6 +764,7 @@ func (s *Server) connect(c *client, msg protocol.Message) {
 		ForceRelay: msg.ForceRelay,
 		Codecs:     msg.Codecs,
 		Viewer:     u.DisplayName,
+		Policy:     policy,
 		ICEServers: s.iceServers("d-" + agent.deviceID),
 	})
 	s.broadcastDevices()

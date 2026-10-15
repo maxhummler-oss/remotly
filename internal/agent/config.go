@@ -52,6 +52,8 @@ type Config struct {
 	AudioArgs []string `json:"audioArgs,omitempty"`
 	// Clipboard enables text clipboard sync.
 	Clipboard bool `json:"clipboard"`
+	// AutoUpdate: "auto" (on, except macOS), "on", "off".
+	AutoUpdate string `json:"autoUpdate,omitempty"`
 }
 
 // DefaultConfigPath: next to the executable on Windows (C:\Program
@@ -78,7 +80,7 @@ func defaults() Config {
 	return Config{
 		Encoder:          "auto",
 		Capture:          "auto",
-		BitrateKbps:      30000,
+		BitrateKbps:      25000,
 		KeyframeInterval: 4,
 		LocalCursor:      "auto",
 		Audio:            "auto",
@@ -122,7 +124,7 @@ func (c *Config) Validate() error {
 		c.FPS = 0
 	}
 	if c.BitrateKbps <= 0 {
-		c.BitrateKbps = 30000
+		c.BitrateKbps = 25000
 	}
 	if c.KeyframeInterval <= 0 {
 		c.KeyframeInterval = 4

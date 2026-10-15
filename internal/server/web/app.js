@@ -42,6 +42,9 @@ const ICONS = {
   alert: '<path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18h.01"/>',
   check: '<path d="M5 12l5 5 9-10"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  displays: '<rect x="2" y="5" width="12" height="9" rx="1.8"/><rect x="10" y="9" width="12" height="9" rx="1.8"/>',
+  download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
 };
 function icon(name) {
   return `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
@@ -427,37 +430,84 @@ function encoderLabel(enc) {
   }[enc] || enc || '';
 }
 
+let deviceFilter = 'all'; // 'all' | 'online' | 'group:<name>'
+
+function deviceCard(d) {
+  const others = busyByOthers(d);
+  const actions = el('div', { class: 'device-actions' });
+  if (d.pending) {
+    if (state.me.admin) actions.append(btn('Freigeben', { cls: 'primary small', icon: 'check', onclick: () => approveDevice(d) }));
+  } else if (d.online) {
+    if (others.length && state.me.admin) {
+      actions.append(btn('Übernehmen', { cls: 'small', title: 'Andere Sitzung beenden und übernehmen', onclick: () => startSession(d, { takeover: true }) }));
+      actions.append(btn('Zuschauen', { cls: 'primary small', icon: 'eye', title: 'Nur ansehen (Support) – der Benutzer wird informiert', onclick: () => startSession(d, { viewOnly: true }) }));
+    } else {
+      actions.append(btn('Verbinden', { cls: 'primary small', disabled: others.length > 0, onclick: () => startSession(d) }));
+    }
+  } else if (d.canWake) {
+    actions.append(btn('Einschalten', { cls: 'small', icon: 'power', onclick: () => wakeDevice(d) }));
+  }
+  return el('div', { class: 'device glass ' + (d.online ? 'online' : 'offline') },
+    el('div', { class: 'device-head' },
+      osIcon(d.os),
+      el('div', {},
+        el('div', { class: 'device-name' }, d.name),
+        el('div', { class: 'device-meta' }, [OS_NAMES[d.os] || d.os, d.encoder && encoderLabel(d.encoder)].filter(Boolean).join(' · ')))),
+    el('div', { class: 'device-foot' }, deviceStatus(d), actions));
+}
+
+function renderFilters() {
+  const groups = [...new Set(state.devices.flatMap((d) => d.groups || []))].sort((a, b) => a.localeCompare(b, 'de'));
+  if (deviceFilter.startsWith('group:') && !groups.includes(deviceFilter.slice(6))) deviceFilter = 'all';
+  const online = state.devices.filter((d) => d.online && !d.pending).length;
+  const chip = (key, label, count, ic) => {
+    const b = el('button', { class: 'filter' + (deviceFilter === key ? ' active' : ''), role: 'tab', onclick: () => { deviceFilter = key; renderDevices(); } });
+    if (ic) b.insertAdjacentHTML('afterbegin', icon(ic));
+    b.append(label, el('span', { class: 'count' }, count));
+    return b;
+  };
+  const box = $('#device-filters');
+  box.classList.toggle('hidden', state.devices.length < 2);
+  box.replaceChildren(
+    chip('all', 'Alle', state.devices.length),
+    chip('online', 'Online', online),
+    ...groups.map((g) => chip('group:' + g, g, state.devices.filter((d) => (d.groups || []).includes(g)).length, 'folder')),
+  );
+}
+
 function renderDevices() {
   const list = $('#device-list');
   const q = ($('#device-search').value || '').toLowerCase();
-  const devices = state.devices.filter((d) => !q || d.name.toLowerCase().includes(q));
+  renderFilters();
+  let devices = state.devices.filter((d) => !q || d.name.toLowerCase().includes(q) || (d.groups || []).some((g) => g.toLowerCase().includes(q)));
+  if (deviceFilter === 'online') devices = devices.filter((d) => d.online && !d.pending);
+  if (deviceFilter.startsWith('group:')) devices = devices.filter((d) => (d.groups || []).includes(deviceFilter.slice(6)));
   $('#no-devices').classList.toggle('hidden', state.devices.length > 0);
   const online = state.devices.filter((d) => d.online && !d.pending).length;
   $('#devices-sub').textContent = state.devices.length
     ? `${online} von ${state.devices.length} ${state.devices.length === 1 ? 'Rechner' : 'Rechnern'} online`
     : '';
-  list.replaceChildren(...devices.map((d) => {
-    const others = busyByOthers(d);
-    const actions = el('div', { class: 'device-actions' });
-    if (d.pending) {
-      if (state.me.admin) actions.append(btn('Freigeben', { cls: 'primary small', icon: 'check', onclick: () => approveDevice(d) }));
-    } else if (d.online) {
-      if (others.length && state.me.admin) {
-        actions.append(btn('Übernehmen', { cls: 'small', title: 'Andere Sitzung beenden und übernehmen', onclick: () => startSession(d, { takeover: true }) }));
-        actions.append(btn('Zuschauen', { cls: 'primary small', icon: 'eye', title: 'Zusätzlich verbinden (Support) – der Benutzer wird informiert', onclick: () => startSession(d) }));
-      } else {
-        actions.append(btn('Verbinden', { cls: 'primary small', disabled: others.length > 0, onclick: () => startSession(d) }));
-      }
-    } else if (d.canWake) {
-      actions.append(btn('Einschalten', { cls: 'small', icon: 'power', onclick: () => wakeDevice(d) }));
-    }
-    return el('div', { class: 'device glass ' + (d.online ? 'online' : 'offline') },
-      el('div', { class: 'device-head' },
-        osIcon(d.os),
-        el('div', {},
-          el('div', { class: 'device-name' }, d.name),
-          el('div', { class: 'device-meta' }, [OS_NAMES[d.os] || d.os, d.encoder && encoderLabel(d.encoder)].filter(Boolean).join(' · ')))),
-      el('div', { class: 'device-foot' }, deviceStatus(d), actions));
+
+  // With groups and no group filter, show one section per group.
+  const grouped = deviceFilter === 'all' || deviceFilter === 'online';
+  const hasGroups = devices.some((d) => (d.groups || []).length);
+  if (!grouped || !hasGroups) {
+    list.replaceChildren(el('div', { class: 'grid' }, devices.map(deviceCard)));
+    return;
+  }
+  const sections = new Map();
+  for (const d of devices) {
+    const g = (d.groups && d.groups[0]) || '';
+    if (!sections.has(g)) sections.set(g, []);
+    sections.get(g).push(d);
+  }
+  const names = [...sections.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, 'de'));
+  list.replaceChildren(...names.map((g) => {
+    const ds = sections.get(g);
+    const on = ds.filter((d) => d.online && !d.pending).length;
+    return el('section', { class: 'group-section' },
+      el('div', { class: 'group-title' }, g || 'Weitere Rechner', el('span', { class: 'muted' }, `${on}/${ds.length} online`)),
+      el('div', { class: 'grid' }, ds.map(deviceCard)));
   }));
 }
 
@@ -673,12 +723,22 @@ function renderAdmin() {
       },
     })))), 'Keine aktiven Sitzungen');
 
-  table('#tbl-users', ['Name', 'Benutzer', 'Rolle', '2FA', 'Geräte', 'Letzte Anmeldung', ''], a.users.map((u) => el('tr', {},
+  const groupName = Object.fromEntries((a.groups || []).map((g) => [g.id, g.name]));
+  table('#tbl-groups', ['Gruppe', 'Rechner', 'Benutzer', ''], (a.groups || []).map((g) => el('tr', {},
+    el('td', {}, el('span', { class: 'tag accent' }, g.name)),
+    el('td', {}, g.devices.map((id) => devName[id]).filter(Boolean).join(', ') || '–'),
+    el('td', {}, a.users.filter((u) => (u.groups || []).includes(g.id)).map((u) => u.displayName).join(', ') || '–'),
+    el('td', { class: 'actions' },
+      btn('Bearbeiten', { cls: 'small', onclick: () => editGroup(g) }),
+      btn('Löschen', { cls: 'danger small', onclick: () => deleteGroup(g) })))), 'Noch keine Gruppen – z. B. „Buchhaltung“ oder „Rack A“');
+
+  table('#tbl-users', ['Name', 'Benutzer', 'Rolle', '2FA', 'Zugriff', 'Letzte Anmeldung', ''], a.users.map((u) => el('tr', {},
     el('td', {}, u.displayName, ' ', u.disabled ? el('span', { class: 'tag red' }, 'deaktiviert') : null),
     el('td', { class: 'mono' }, u.name),
     el('td', {}, u.admin ? el('span', { class: 'tag accent' }, 'Admin') : el('span', { class: 'tag' }, 'Benutzer')),
     el('td', {}, u.totp ? el('span', { class: 'tag ok' }, 'aktiv') : el('span', { class: a.require2FA ? 'tag warn' : 'tag' }, 'aus')),
-    el('td', {}, u.admin ? 'alle' : (u.devices.map((id) => devName[id]).filter(Boolean).join(', ') || '–')),
+    el('td', {}, u.admin ? 'alle' : ([...(u.groups || []).map((id) => groupName[id]).filter(Boolean).map((n) => 'Gruppe ' + n),
+      ...u.devices.map((id) => devName[id]).filter(Boolean)].join(', ') || '–')),
     el('td', {}, fmtTime(u.lastLogin)),
     el('td', { class: 'actions' },
       btn('Bearbeiten', { cls: 'small', onclick: () => editUser(u) }),
@@ -712,7 +772,8 @@ async function loadAudit() {
       'device.renamed': 'Gerät umbenannt', 'device.revoked': 'Gerät entfernt', 'device.approved': 'Gerät freigegeben',
       'user.created': 'Benutzer angelegt', 'user.updated': 'Benutzer geändert', 'user.deleted': 'Benutzer gelöscht',
       'user.password_changed': 'Passwort geändert', 'user.2fa_enabled': '2FA aktiviert', 'user.2fa_disabled': '2FA deaktiviert',
-      'enroll_key.rotated': 'Registrierungsschlüssel erneuert',
+      'enroll_key.rotated': 'Registrierungsschlüssel erneuert', 'group.saved': 'Gruppe gespeichert',
+      'group.deleted': 'Gruppe gelöscht', 'audit.exported': 'Protokoll exportiert',
     };
     const bad = (ev) => /fail|denied/.test(ev);
     table('#tbl-audit', ['Zeit', 'Ereignis', 'Benutzer', 'Gerät', 'IP', 'Details'], (entries || []).map((e) => el('tr', {},
@@ -737,6 +798,44 @@ function deviceChecks(selected) {
   return { box, values: () => inputs.filter((i) => i.checked).map((i) => i.value) };
 }
 
+function groupChecks(selected) {
+  const box = el('div', { class: 'device-checks' });
+  const inputs = (state.admin.groups || []).map((g) => {
+    const cb = el('input', { type: 'checkbox', value: g.id, checked: selected.includes(g.id) });
+    box.append(check(`${g.name} (${g.devices.length} Rechner)`, cb));
+    return cb;
+  });
+  if (!inputs.length) box.append(el('p', { class: 'muted small' }, 'Noch keine Gruppen angelegt.'));
+  return { box, values: () => inputs.filter((i) => i.checked).map((i) => i.value) };
+}
+
+$('#btn-add-group').addEventListener('click', () => editGroup(null));
+
+function editGroup(g) {
+  const name = el('input', { value: g ? g.name : '', required: true, maxlength: 64, placeholder: 'z. B. Buchhaltung' });
+  const devs = deviceChecks(g ? g.devices : []);
+  dialog({
+    title: g ? `Gruppe „${g.name}“` : 'Neue Gruppe',
+    body: [field('Name', name), field('Rechner in dieser Gruppe', devs.box),
+      el('p', { class: 'muted small' }, 'Benutzer, denen die Gruppe zugewiesen ist, dürfen alle diese Rechner steuern.')],
+    okText: g ? 'Sichern' : 'Anlegen',
+    onOk: async () => {
+      await api(g ? 'PATCH' : 'POST', g ? `/api/admin/groups/${g.id}` : '/api/admin/groups', { name: name.value, devices: devs.values() });
+      toast(g ? 'Gruppe gespeichert' : 'Gruppe angelegt');
+      loadAdmin();
+    },
+  });
+}
+
+function deleteGroup(g) {
+  dialog({
+    title: 'Gruppe löschen?',
+    body: el('p', {}, `„${g.name}“ wird gelöscht. Benutzer verlieren den Zugriff, der nur über diese Gruppe bestand.`),
+    okText: 'Löschen', danger: true,
+    onOk: async () => { await api('DELETE', `/api/admin/groups/${g.id}`); toast('Gruppe gelöscht'); loadAdmin(); },
+  });
+}
+
 function genPassword() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
   const a = crypto.getRandomValues(new Uint32Array(16));
@@ -748,14 +847,15 @@ $('#btn-add-user').addEventListener('click', () => {
   const display = el('input', { placeholder: 'Max Mustermann', autocomplete: 'off' });
   const pw = el('input', { required: true, minlength: 10, value: genPassword(), autocomplete: 'new-password' });
   const admin = el('input', { type: 'checkbox' });
+  const grps = groupChecks([]);
   const devs = deviceChecks([]);
   dialog({
     title: 'Benutzer anlegen',
     body: [field('Benutzername', name), field('Anzeigename', display), field('Startpasswort (bitte notieren)', pw),
-      check('Administrator', admin), field('Erlaubte Geräte', devs.box)],
+      check('Administrator', admin), field('Gruppen', grps.box), field('Einzelne Rechner', devs.box)],
     okText: 'Anlegen',
     onOk: async () => {
-      await api('POST', '/api/admin/users', { name: name.value, displayName: display.value, password: pw.value, admin: admin.checked, devices: devs.values() });
+      await api('POST', '/api/admin/users', { name: name.value, displayName: display.value, password: pw.value, admin: admin.checked, devices: devs.values(), groups: grps.values() });
       toast('Benutzer angelegt');
       loadAdmin();
     },
@@ -768,6 +868,7 @@ function editUser(u) {
   const admin = el('input', { type: 'checkbox', checked: u.admin });
   const disabled = el('input', { type: 'checkbox', checked: !!u.disabled });
   const reset = el('input', { type: 'checkbox' });
+  const grps = groupChecks(u.groups || []);
   const devs = deviceChecks(u.devices);
   dialog({
     title: u.displayName,
@@ -775,11 +876,12 @@ function editUser(u) {
       field('Anzeigename', display), field('Neues Passwort', pw),
       check('Administrator', admin), check('Deaktiviert', disabled),
       u.totp ? check('Zwei-Faktor-Anmeldung zurücksetzen (Telefon verloren)', reset) : null,
-      field('Erlaubte Geräte', devs.box),
+      field('Gruppen', grps.box),
+      field('Einzelne Rechner', devs.box),
     ],
     okText: 'Sichern',
     onOk: async () => {
-      const patch = { displayName: display.value, devices: devs.values() };
+      const patch = { displayName: display.value, devices: devs.values(), groups: grps.values() };
       if (pw.value) patch.password = pw.value;
       if (admin.checked !== u.admin) patch.admin = admin.checked;
       if (disabled.checked !== !!u.disabled) patch.disabled = disabled.checked;
@@ -907,7 +1009,7 @@ class Session {
     this.id = null;
     const caps = (RTCRtpReceiver.getCapabilities && RTCRtpReceiver.getCapabilities('video')) || { codecs: [] };
     const codecs = [...new Set(caps.codecs.map((c) => c.mimeType))];
-    sendSignal({ type: 'connect', target: this.device.id, forceRelay: settings.forceRelay, takeover: !!this.opts.takeover, codecs });
+    sendSignal({ type: 'connect', target: this.device.id, forceRelay: settings.forceRelay, takeover: !!this.opts.takeover, viewOnly: !!this.opts.viewOnly, codecs });
     this.opts.takeover = false;
   }
 
@@ -932,6 +1034,7 @@ class Session {
       case 'session-started':
         if (msg.target !== this.device.id) return;
         this.id = msg.session;
+        this.setPolicy(msg.policy || {});
         this.createPC(msg.iceServers || []);
         break;
       case 'offer':
@@ -1093,11 +1196,14 @@ class Session {
         this.applyCursor(m.shape || 'default');
         $('#btn-audio').classList.toggle('hidden', !m.audio);
         this.showDesktop(m.desktop);
+        this.updateDisplays(m.display || 0, m.displays || 1);
+        if (m.viewOnly) this.setPolicy({ ...(this.policy || {}), viewOnly: true });
         break;
       case 'cursor':
         this.applyCursor(m.c);
         break;
       case 'clip':
+        if (this.policy && this.policy.clipboard && !['both', 'to-local'].includes(this.policy.clipboard)) break;
         this.lastClip = m.text;
         if (document.hasFocus() && navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(m.text).catch(() => {});
@@ -1106,10 +1212,30 @@ class Session {
       case 'desktop':
         this.showDesktop(m.name);
         break;
+      case 'display':
+        this.updateDisplays(m.n, m.count);
+        this.rect = null;
+        break;
       case 'p':
         this.pingRTT = performance.now() - m.ts;
         break;
     }
+  }
+
+  setPolicy(p) {
+    this.policy = p;
+    this.viewOnly = !!p.viewOnly;
+    $('#tb-viewonly').classList.toggle('hidden', !this.viewOnly);
+    for (const id of ['#btn-cad', '#btn-pointer']) $(id).classList.toggle('hidden', this.viewOnly);
+    $('.tb-swap').classList.toggle('hidden', this.viewOnly);
+  }
+
+  updateDisplays(n, count) {
+    this.display = n;
+    this.displays = count;
+    $('#btn-display').classList.toggle('hidden', !(count > 1));
+    $('#display-label').textContent = `${n + 1}/${count}`;
+    $('#btn-display').title = `Bildschirm ${n + 1} von ${count} – zum nächsten wechseln`;
   }
 
   showDesktop(name) {
@@ -1147,6 +1273,8 @@ class Session {
   // ---- input (viewer -> agent)
 
   send(obj, reliable = true) {
+    // Watch-only sessions send no input (the agent would drop it anyway).
+    if (this.viewOnly && obj.t !== 'p' && obj.t !== 'display') return;
     const dc = reliable ? this.control : (this.motion || this.control);
     if (dc && dc.readyState === 'open') dc.send(JSON.stringify(obj));
   }
@@ -1303,6 +1431,7 @@ class Session {
       if (r && r.catch) r.catch(() => v.requestPointerLock());
     };
     $('#btn-cad').onclick = () => this.send({ t: 'sas' });
+    $('#btn-display').onclick = () => this.send({ t: 'display', n: ((this.display || 0) + 1) % (this.displays || 1) });
     $('#btn-stats').onclick = () => $('#stats-detail').classList.toggle('hidden');
     $('#btn-audio').onclick = () => { v.muted = !v.muted; this.updateAudioBtn(); };
     $('#btn-unmute').onclick = () => { v.muted = false; v.play(); $('#btn-unmute').classList.add('hidden'); this.updateAudioBtn(); };
@@ -1335,6 +1464,8 @@ class Session {
     $('#toolbar').removeEventListener('pointerleave', h.toolbarLeave);
     $('#toolbar').removeEventListener('pointerenter', h.toolbarEnter);
     v.style.cursor = '';
+    this.setPolicy({});
+    this.updateDisplays(0, 1);
     $('#toolbar').classList.add('collapsed');
     $('#stats-detail').classList.add('hidden');
     $('#btn-unmute').classList.add('hidden');

@@ -104,7 +104,8 @@
           </div>
           <div class="search-wrap"><span data-icon="search"></span><input type="search" id="device-search" placeholder="Suchen" aria-label="Geräte suchen"></div>
         </div>
-        <div id="device-list" class="grid"></div>
+        <div class="filters" id="device-filters" role="tablist" aria-label="Filter"></div>
+        <div id="device-list"></div>
         <div id="no-devices" class="empty glass hidden">
           <div class="os-icon" data-icon="display"></div>
           <h2>Noch keine Geräte</h2>
@@ -137,6 +138,14 @@
 
         <div class="panel glass">
           <div class="panel-head">
+            <h2>Gruppen</h2>
+            <button class="btn small" id="btn-add-group"><span data-icon="plus"></span>Gruppe</button>
+          </div>
+          <div class="table-wrap"><table id="tbl-groups"></table></div>
+        </div>
+
+        <div class="panel glass">
+          <div class="panel-head">
             <h2>Geräte</h2>
             <button class="btn small" id="btn-add-device"><span data-icon="plus"></span>Gerät hinzufügen</button>
           </div>
@@ -157,7 +166,10 @@
         <div class="panel glass">
           <div class="panel-head">
             <h2>Protokoll</h2>
-            <button class="btn plain small" id="btn-reload-audit"><span data-icon="refresh"></span>Aktualisieren</button>
+            <div class="panel-actions">
+              <a class="btn plain small" href="/api/admin/audit.csv" download><span data-icon="download"></span>CSV-Export</a>
+              <button class="btn plain small" id="btn-reload-audit"><span data-icon="refresh"></span>Aktualisieren</button>
+            </div>
           </div>
           <div class="table-wrap scroll"><table id="tbl-audit"></table></div>
         </div>
@@ -191,8 +203,10 @@
       <span class="tb-dot" id="tb-dot"></span>
       <span id="session-name" class="tb-name"></span>
       <span id="tb-desktop" class="tb-badge hidden"></span>
+      <span id="tb-viewonly" class="tb-badge info hidden">Nur Ansicht</span>
       <span id="stats" class="tb-stats">–</span>
       <span class="tb-sep"></span>
+      <button class="tb-btn tb-display hidden" id="btn-display" title="Nächster Bildschirm"><span data-icon="displays"></span><span id="display-label">1/2</span></button>
       <button class="tb-btn" id="btn-audio" title="Ton ein/aus" data-icon="speaker"></button>
       <button class="tb-btn" id="btn-fullscreen" title="Vollbild – übernimmt die komplette Tastatur (Alt+Tab, Windows-Taste …)" data-icon="expand"></button>
       <button class="tb-btn" id="btn-pointer" title="Maus fangen (relativer Modus für Spiele/3D). Esc lange drücken zum Beenden." data-icon="target"></button>

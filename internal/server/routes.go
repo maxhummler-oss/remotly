@@ -54,12 +54,16 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("GET /api/admin/overview", s.admin(s.handleOverview))
 	mux.HandleFunc("GET /api/admin/audit", s.admin(s.handleAudit))
+	mux.HandleFunc("GET /api/admin/audit.csv", s.admin(s.handleAuditCSV))
 	mux.HandleFunc("POST /api/admin/users", s.admin(s.handleAddUser))
 	mux.HandleFunc("PATCH /api/admin/users/{name}", s.admin(s.handlePatchUser))
 	mux.HandleFunc("DELETE /api/admin/users/{name}", s.admin(s.handleDeleteUser))
 	mux.HandleFunc("PATCH /api/admin/devices/{id}", s.admin(s.handlePatchDevice))
 	mux.HandleFunc("DELETE /api/admin/devices/{id}", s.admin(s.handleDeleteDevice))
 	mux.HandleFunc("DELETE /api/admin/sessions/{id}", s.admin(s.handleKick))
+	mux.HandleFunc("POST /api/admin/groups", s.admin(s.handleSaveGroup))
+	mux.HandleFunc("PATCH /api/admin/groups/{id}", s.admin(s.handleSaveGroup))
+	mux.HandleFunc("DELETE /api/admin/groups/{id}", s.admin(s.handleDeleteGroup))
 	mux.HandleFunc("POST /api/admin/enroll-key", s.admin(s.handleRotateEnrollKey))
 
 	mux.HandleFunc("POST /api/agent/enroll", s.handleEnroll)
@@ -256,7 +260,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u 
 
 func (s *Server) handleWake(w http.ResponseWriter, r *http.Request, u User) {
 	id := r.PathValue("id")
-	if !u.CanAccess(id) {
+	if !s.store.CanAccess(u, id) {
 		fail(w, http.StatusForbidden, "Keine Berechtigung")
 		return
 	}
@@ -342,11 +346,21 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request, _ User) 
 		"agents":        s.agentBinaries(),
 		"tls":           s.cfg.TLS,
 		"require2FA":    s.cfg.Require2FA,
+		"groups":        s.store.Groups(),
 	})
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, _ User) {
 	writeJSON(w, http.StatusOK, s.audit.Tail(300))
+}
+
+func (s *Server) handleAuditCSV(w http.ResponseWriter, r *http.Request, admin User) {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="remotly-audit.csv"`)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Write([]byte("\ufeff")) // BOM so Excel detects UTF-8
+	WriteCSV(w, s.audit.All())
+	s.audit.Log(AuditEntry{Event: "audit.exported", User: admin.Name, IP: remoteIP(r)})
 }
 
 func (s *Server) handleAddUser(w http.ResponseWriter, r *http.Request, admin User) {
@@ -356,6 +370,7 @@ func (s *Server) handleAddUser(w http.ResponseWriter, r *http.Request, admin Use
 		Password    string   `json:"password"`
 		Admin       bool     `json:"admin"`
 		Devices     []string `json:"devices"`
+		Groups      []string `json:"groups"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
@@ -366,8 +381,8 @@ func (s *Server) handleAddUser(w http.ResponseWriter, r *http.Request, admin Use
 		return
 	}
 	name := strings.ToLower(strings.TrimSpace(req.Name))
-	if len(req.Devices) > 0 {
-		s.store.UpdateUser(name, UserPatch{Devices: &req.Devices})
+	if len(req.Devices) > 0 || len(req.Groups) > 0 {
+		s.store.UpdateUser(name, UserPatch{Devices: &req.Devices, Groups: &req.Groups})
 	}
 	s.audit.Log(AuditEntry{Event: "user.created", User: admin.Name, IP: remoteIP(r), Detail: name})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -396,6 +411,9 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request, admin U
 	}
 	if p.Devices != nil {
 		what = append(what, "devices")
+	}
+	if p.Groups != nil {
+		what = append(what, "groups")
 	}
 	if p.ResetTOTP {
 		what = append(what, "2fa-reset")
@@ -464,6 +482,39 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request, admi
 	}
 	s.disconnectDevice(id)
 	s.audit.Log(AuditEntry{Event: "device.revoked", User: admin.Name, Device: d.Name, IP: remoteIP(r), Detail: id})
+	s.broadcastDevices()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleSaveGroup(w http.ResponseWriter, r *http.Request, admin User) {
+	var req struct {
+		Name    string    `json:"name"`
+		Devices *[]string `json:"devices"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var devices []string
+	if req.Devices != nil {
+		devices = *req.Devices
+	}
+	id, err := s.store.SaveGroup(r.PathValue("id"), req.Name, devices)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.audit.Log(AuditEntry{Event: "group.saved", User: admin.Name, IP: remoteIP(r), Detail: req.Name})
+	s.broadcastDevices()
+	writeJSON(w, http.StatusOK, map[string]string{"id": id})
+}
+
+func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request, admin User) {
+	if err := s.store.DeleteGroup(r.PathValue("id")); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.audit.Log(AuditEntry{Event: "group.deleted", User: admin.Name, IP: remoteIP(r), Detail: r.PathValue("id")})
 	s.broadcastDevices()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

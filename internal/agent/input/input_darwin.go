@@ -324,6 +324,15 @@ func (m *macBackend) keepAwake(on bool) {
 
 func (m *macBackend) sendSAS() {}
 
+func (m *macBackend) displays() int {
+	var ids [16]uint32
+	var n uint32
+	if cgGetActiveDisplayList(uint32(len(ids)), &ids[0], &n) != 0 || n == 0 {
+		return 1
+	}
+	return int(n)
+}
+
 func pick(cond bool, a, b uint32) uint32 {
 	if cond {
 		return a

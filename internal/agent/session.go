@@ -24,6 +24,7 @@ type session struct {
 	viewer   string
 	agent    *Agent
 	pipeline *stream.Pipeline
+	policy   *protocol.Policy
 	pc       *webrtc.PeerConnection
 	video    *webrtc.TrackLocalStaticSample
 	audio    *webrtc.TrackLocalStaticSample
@@ -35,8 +36,16 @@ type session struct {
 	closed     bool
 }
 
+// current returns the pipeline the session is watching (it changes when
+// the viewer switches displays).
+func (s *session) current() *stream.Pipeline {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pipeline
+}
+
 // chooseCodec picks the best codec the viewer can decode.
-func (a *Agent) chooseCodec(viewer []string) (*stream.Pipeline, error) {
+func (a *Agent) chooseCodec(viewer []string, display int) (*stream.Pipeline, error) {
 	supports := func(mime string) bool {
 		if len(viewer) == 0 {
 			return mime == webrtc.MimeTypeH264 // old viewers did not report codecs
@@ -56,7 +65,7 @@ func (a *Agent) chooseCodec(viewer []string) (*stream.Pipeline, error) {
 		if !supports(c.mime) {
 			continue
 		}
-		p, err := a.pipelineFor(c.codec)
+		p, err := a.pipelineFor(c.codec, display)
 		if err == nil {
 			return p, nil
 		}
@@ -69,7 +78,7 @@ func (a *Agent) chooseCodec(viewer []string) (*stream.Pipeline, error) {
 }
 
 func (a *Agent) startSession(msg protocol.Message) error {
-	pipeline, err := a.chooseCodec(msg.Codecs)
+	pipeline, err := a.chooseCodec(msg.Codecs, a.cfg.Display)
 	if err != nil {
 		return err
 	}
@@ -85,7 +94,14 @@ func (a *Agent) startSession(msg protocol.Message) error {
 	if err != nil {
 		return err
 	}
-	s := &session{id: msg.Session, viewer: msg.Viewer, agent: a, pc: pc, pipeline: pipeline}
+	policy := msg.Policy
+	if policy == nil {
+		policy = &protocol.Policy{Clipboard: "both"}
+	}
+	if !a.cfg.Clipboard {
+		policy.Clipboard = "off" // the machine owner disabled it locally
+	}
+	s := &session{id: msg.Session, viewer: msg.Viewer, agent: a, pc: pc, pipeline: pipeline, policy: policy}
 	fail := func(err error) error {
 		pc.Close()
 		return err
@@ -115,9 +131,13 @@ func (a *Agent) startSession(msg protocol.Message) error {
 				return
 			}
 			for _, p := range pkts {
-				switch p.(type) {
+				switch p := p.(type) {
 				case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
-					pipeline.RequestKeyframe()
+					s.current().RequestKeyframe()
+				case *rtcp.ReceiverReport:
+					for _, r := range p.Reports {
+						s.current().ReportLoss(float64(r.FractionLost) / 256)
+					}
 				}
 			}
 		}
@@ -145,7 +165,10 @@ func (a *Agent) startSession(msg protocol.Message) error {
 	}
 
 	if a.sys != nil {
-		s.inj = a.sys.NewInjector()
+		s.inj = a.sys.NewInjector(func() input.Mapping {
+			c := s.current().Capture()
+			return input.Mapping{VirtualDesktop: c.VirtualDesktop, Display: c.Display}
+		})
 	}
 
 	// Keys, clicks and control messages must arrive reliably and in order;
@@ -173,10 +196,14 @@ func (a *Agent) startSession(msg protocol.Message) error {
 			"codec":     pipeline.Codec(),
 			"capture":   pipeline.Variant(),
 			"fps":       pipeline.FPS(),
+			"display":   pipeline.Display(),
+			"displays":  a.displays(),
 			"bitrate":   a.cfg.BitrateKbps,
-			"input":     s.inj != nil,
+			"input":     s.inj != nil && !policy.ViewOnly,
+			"viewOnly":  policy.ViewOnly,
+			"clipLocal": policy.ClipToLocal(),
 			"audio":     a.audio != nil,
-			"clipboard": a.cfg.Clipboard,
+			"clipboard": policy.ClipToRemote(),
 			"cursor":    "stream",
 		}
 		if a.cfg.UseLocalCursor() {
@@ -251,7 +278,11 @@ func (s *session) addCandidate(raw json.RawMessage) {
 	}
 }
 
-var pingPrefix = []byte(`{"t":"p"`)
+var (
+	pingPrefix    = []byte(`{"t":"p"`)
+	clipPrefix    = []byte(`{"t":"clip"`)
+	displayPrefix = []byte(`{"t":"display"`)
+)
 
 func (s *session) onInput(dc *webrtc.DataChannel, data []byte) {
 	// Latency probe: echo back untouched so the viewer can measure the
@@ -260,12 +291,56 @@ func (s *session) onInput(dc *webrtc.DataChannel, data []byte) {
 		dc.SendText(string(data))
 		return
 	}
-	if s.inj == nil {
+	// Switching displays only changes what is watched: allowed even for
+	// view-only sessions.
+	if bytes.HasPrefix(data, displayPrefix) {
+		var m struct{ N int }
+		if json.Unmarshal(data, &m) == nil {
+			s.switchDisplay(m.N)
+		}
+		return
+	}
+	// Policy is enforced here, on the controlled machine: a modified
+	// viewer cannot bypass it.
+	if s.inj == nil || s.policy.ViewOnly {
+		return
+	}
+	if bytes.HasPrefix(data, clipPrefix) && !s.policy.ClipToRemote() {
 		return
 	}
 	if err := s.inj.HandleJSON(data); err != nil {
 		log.Printf("session %s: bad input event: %v", s.id, err)
 	}
+}
+
+// switchDisplay moves the session to another display's pipeline.
+func (s *session) switchDisplay(n int) {
+	if n < 0 || n >= s.agent.displays() {
+		return
+	}
+	old := s.current()
+	if old.Display() == n {
+		return
+	}
+	next, err := s.agent.pipelineFor(old.Codec(), n)
+	if err != nil {
+		log.Printf("session %s: switch to display %d: %v", s.id, n, err)
+		return
+	}
+	if s.inj != nil {
+		s.inj.Release()
+	}
+	s.mu.Lock()
+	s.pipeline = next
+	subscribed := s.subscribed && !s.closed
+	s.mu.Unlock()
+	if subscribed {
+		next.Subscribe(s) // starts at the next keyframe
+		old.Unsubscribe(s)
+	}
+	data, _ := json.Marshal(map[string]any{"t": "display", "n": n, "count": s.agent.displays()})
+	s.sendControl(data)
+	log.Printf("session %s: switched to display %d", s.id, n)
 }
 
 func (s *session) sendControl(data []byte) {
@@ -336,7 +411,7 @@ func (s *session) close(reason string, notify bool) {
 	a.mu.Unlock()
 
 	if wasSubscribed {
-		s.pipeline.Unsubscribe(s)
+		s.current().Unsubscribe(s)
 		if a.audio != nil {
 			a.audio.Unsubscribe(s)
 		}

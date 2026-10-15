@@ -47,13 +47,13 @@ func TestStoreUsersAndDevices(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, _ := s.GetUser("max")
-	if u.CanAccess(id) {
+	if s.CanAccess(u, id) {
 		t.Fatal("user can access unassigned device")
 	}
 	devs := []string{id, "unknown"}
 	s.UpdateUser("max", UserPatch{Devices: &devs})
 	u, _ = s.GetUser("max")
-	if !u.CanAccess(id) || len(u.Devices) != 1 {
+	if !s.CanAccess(u, id) || len(u.Devices) != 1 {
 		t.Fatalf("assignment wrong: %v", u.Devices)
 	}
 
@@ -137,5 +137,70 @@ func TestTOTP(t *testing.T) {
 	// RFC 6238 test vector (SHA-1, T=59s -> 94287082, 6 digits: 287082).
 	if got := totpCode([]byte("12345678901234567890"), 59/30); got != "287082" {
 		t.Fatalf("RFC vector: got %s", got)
+	}
+}
+
+func TestGroups(t *testing.T) {
+	s, _ := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	s.AddUser("admin", "", "long enough password", true)
+	s.AddUser("eva", "", "long enough password", false)
+	d1, _, _ := s.Enroll(s.EnrollKey(), "PC 1", "pc1", "windows", "amd64", "", false)
+	d2, _, _ := s.Enroll(s.EnrollKey(), "PC 2", "pc2", "windows", "amd64", "", false)
+	gid, err := s.SaveGroup("", "Buchhaltung", []string{d1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveGroup("", "buchhaltung", nil); err == nil {
+		t.Fatal("duplicate group name accepted")
+	}
+	groups := []string{gid}
+	s.UpdateUser("eva", UserPatch{Groups: &groups})
+	u, _ := s.GetUser("eva")
+	if !s.CanAccess(u, d1) || s.CanAccess(u, d2) {
+		t.Fatal("group access wrong")
+	}
+	s.DeleteDevice(d1)
+	if g := s.Groups(); len(g[0].Devices) != 0 {
+		t.Fatal("deleted device still in group")
+	}
+	s.DeleteGroup(gid)
+	u, _ = s.GetUser("eva")
+	if len(u.Groups) != 0 {
+		t.Fatal("deleted group still assigned")
+	}
+}
+
+func TestIdleExpiry(t *testing.T) {
+	a := &auth{sessions: map[string]*webSession{}, failures: map[string]*failure{}, ttl: time.Hour, idle: time.Minute}
+	ws := a.create("u", "1.2.3.4")
+	ws.lastSeen = time.Now().Add(-2 * time.Minute)
+	a.attach(ws.id, 1)
+	ws.lastSeen = time.Now().Add(-2 * time.Minute)
+	if a.get(ws.id) == nil {
+		t.Fatal("open page expired")
+	}
+	a.attach(ws.id, -1)
+	ws.lastSeen = time.Now().Add(-2 * time.Minute)
+	if a.get(ws.id) != nil {
+		t.Fatal("idle session not expired")
+	}
+}
+
+func TestPasswordPolicy(t *testing.T) {
+	for _, pw := range []string{"short", "passwort123", "1234567890", "max.mustermann-2026"} {
+		if ValidatePassword(pw, "max.mustermann") == nil {
+			t.Errorf("weak password %q accepted", pw)
+		}
+	}
+	if err := ValidatePassword("Kaffee-Tasse-Fenster-42", "max.mustermann"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAuditCSVInjection(t *testing.T) {
+	var b strings.Builder
+	WriteCSV(&b, []AuditEntry{{Event: "login", User: "=cmd|' /C calc'!A0"}})
+	if !strings.Contains(b.String(), "'=cmd") {
+		t.Fatalf("formula not neutralized: %s", b.String())
 	}
 }

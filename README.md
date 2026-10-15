@@ -57,6 +57,10 @@ Routing), läuft der Datenstrom über das TURN-Relay des Servers.
 - Während einer Sitzung wird die Oberfläche hinter dem Video komplett
   abgeschaltet; Glas-Effekte über dem Video sind so leicht, dass sie keine
   Bilder kosten.
+- **Adaptive Bitrate:** melden Viewer Paketverlust (z. B. weil sich viele
+  Sitzungen einen Uplink teilen), senkt der Rack-PC die Datenrate und steigert
+  sie danach schrittweise wieder; optional serverweite Obergrenze
+  (`maxBitrateKbps`).
 - Live-Anzeige in der Sitzung: Netzwerk-RTT, Eingabe-RTT, Jitter-Puffer,
   Dekodierzeit, **gemessene Empfang→Anzeige-Zeit pro Frame**, fps, Datenrate,
   direkt/Relay.
@@ -77,7 +81,16 @@ Routing), läuft der Datenstrom über das TURN-Relay des Servers.
 - **Zwischenablage** (Text) in beide Richtungen.
 - Volle Tastatur im Vollbild (Alt+Tab, Windows-Taste, Esc … gehen an den
   Remote-Rechner), Cmd↔Strg-Tausch für Mac↔Windows.
-- Admin-Oberfläche: Benutzer, Geräte, aktive Sitzungen (beenden), Audit-Protokoll.
+- **Gruppen** (Abteilungen, Räume, Racks): Rechner in Gruppen, Benutzer bekommen
+  Gruppen zugewiesen – bei vielen Geräten statt Einzelzuweisungen. Die
+  Geräteübersicht ist nach Gruppen sortiert und filterbar (Alle / Online / Gruppe).
+- **Mehrere Monitore:** in der Sitzung per Klick zwischen den Bildschirmen des
+  Rack-PCs wechseln; Maus und Tastatur landen automatisch auf dem richtigen.
+- **Automatische Agent-Updates:** neue Version einfach auf den Server legen – alle
+  Agents aktualisieren sich selbst, sobald niemand verbunden ist (Prüfsumme über
+  den gepinnten Kanal verifiziert; unter macOS standardmäßig aus).
+- Admin-Oberfläche: Benutzer, Gruppen, Geräte, aktive Sitzungen (beenden),
+  Audit-Protokoll mit CSV-Export.
 
 **Design**
 - Oberfläche im **Liquid-Glass-Stil**: lichtbrechende Glasflächen mit
@@ -92,7 +105,16 @@ Routing), läuft der Datenstrom über das TURN-Relay des Servers.
   Wiederverwendung von Codes; per `"require2fa": true` für alle Pflicht.
 - **Neue Geräte müssen von einem Admin freigegeben werden** – ein geleakter
   Registrierungsschlüssel reicht nicht, um Rechner einzuschleusen.
-- Schaut ein Admin bei einer Sitzung zu, wird der Benutzer **sofort informiert**.
+- Schaut ein Admin bei einer Sitzung zu, ist das **technisch nur Ansicht** (der
+  Agent verwirft jede Eingabe) und der Benutzer wird **sofort informiert**.
+- **Zwischenablage-Richtlinie** gegen Datenabfluss: beide Richtungen, nur zum
+  Rack-PC, nur zum Thin Client oder aus – durchgesetzt auf dem Rack-PC selbst,
+  nicht im (manipulierbaren) Browser.
+- Passwortregeln: mind. 10 Zeichen, keine Allerweltspasswörter, nicht aus dem
+  Benutzernamen abgeleitet. Browser-Anmeldungen verfallen nach 60 Minuten ohne
+  geöffnete Seite.
+- Audit-Log rotiert automatisch (5 × 20 MB), Export als CSV (Excel-tauglich,
+  geschützt gegen Formel-Injection).
 - Kiosk-Thin-Clients melden sich nach 2 Minuten Inaktivität **automatisch ab**.
 - HTTPS standardmäßig, mit eigener **lokaler CA** (einmal auf den Thin Clients
   installieren) oder eurem Firmen-Zertifikat; TLS 1.2 nur mit
@@ -213,6 +235,28 @@ Mausbewegung ohnehin verzögerungsfrei.
 
 In der Sitzung zeigt die Leiste oben die geschätzte Latenz; 📊 öffnet Details.
 
+## Viele Geräte – Lasttest
+
+`REMOTLY_LOAD=1 go test -run TestLoad -v ./internal/server` simuliert ein Büro
+gegen einen echten Server (echte WebSocket-Protokolle). Ergebnisse auf einer
+4-Kern-VM:
+
+| | 500 Rechner, 200 Viewer | 2000 Rechner, 500 Viewer |
+|---|---|---|
+| Alle Agents verbunden | 1,2 s | 0,3 s |
+| Geräteänderung bei allen Viewern | 0,25 s | 0,8 s ¹ |
+| Gleichzeitige Sitzungsstarts (alle Viewer auf einmal), p95 | 7,7 ms | 21 ms |
+| 30 Rechner fallen gleichzeitig aus | 1 Update pro Viewer | 1 Update pro Viewer |
+| Arbeitsspeicher des Servers | 53 MB | 166 MB |
+
+¹ inklusive 150 ms absichtlicher Bündelung; der Rest ist überwiegend das Parsen
+von 500 × 2000-Geräte-Listen durch die simulierten Viewer im selben Prozess.
+
+Der Server ist nur Vermittler: Bild und Eingaben laufen direkt zwischen Thin
+Client und Rack-PC und belasten ihn nicht. Netzwerkplanung: pro aktiver Sitzung
+fallen je nach Bildinhalt 1–25 Mbit/s an (ruhiger Office-Desktop deutlich
+weniger); bei Engpässen regelt die adaptive Bitrate nach.
+
 ## Bedienung in der Sitzung
 
 | | |
@@ -222,6 +266,8 @@ In der Sitzung zeigt die Leiste oben die geschätzte Latenz; 📊 öffnet Detail
 | 🎯 Maus fangen | relativer Mausmodus für 3D/Spiele (Pointer-Lock) |
 | ⌘⇄Strg | Cmd und Strg tauschen (automatisch an bei Mac ↔ Windows) |
 | ⌃⌥⌦ | Strg+Alt+Entf |
+| Bildschirm „1/2“ | zum nächsten Monitor des Rack-PCs wechseln (nur bei mehreren Monitoren) |
+| „Nur Ansicht“ | Admin schaut zu – Eingaben sind gesperrt |
 | Zwischenablage | automatisch: beim Einfügen (Strg/Cmd+V) und beim Zurückkehren in das Fenster |
 
 ---
@@ -243,6 +289,9 @@ In der Sitzung zeigt die Leiste oben die geschätzte Latenz; 📊 öffnet Detail
 | `sessionHours` | `12` | Gültigkeit einer Anmeldung |
 | `require2fa` | `false` | Zwei-Faktor-Anmeldung für alle Benutzer erzwingen |
 | `approveDevices` | `true` | Neue Geräte erst nach Admin-Freigabe nutzbar |
+| `clipboard` | `both` | Zwischenablage: `both`, `to-remote` (nur Thin Client → PC), `to-local`, `off` |
+| `idleMinutes` | `60` | Abmeldung, wenn so lange keine Seite geöffnet war |
+| `maxBitrateKbps` | `0` | Obergrenze für die Video-Datenrate aller Rechner (0 = keine) |
 | `dataDir` | `/var/lib/remotly` | Benutzer/Geräte (`state.json`), Audit-Log, Zertifikate |
 
 Befehle:
@@ -264,7 +313,7 @@ Linux `~/.config/remotly/`.
 | Feld | Standard | Bedeutung |
 |---|---|---|
 | `fps` | `0` (auto) | 0 = 120 fps bei Windows + Hardware-Encoder, sonst 60; oder fester Wert |
-| `bitrateKbps` | `30000` | Datenrate (LAN: 20–50 Mbit/s sind unproblematisch) |
+| `bitrateKbps` | `25000` | Maximale Datenrate; sinkt bei Netzengpässen automatisch |
 | `maxWidth` | `0` | 0 = native Auflösung (ermöglicht Zero-Copy), sonst herunterskalieren |
 | `encoder` | `auto` | oder fest: `h264_nvenc`, `h264_amf`, `h264_qsv`, `h264_videotoolbox`, `libx264` |
 | `capture` | `auto` | Windows: `ddagrab` (Standard) / `gdigrab` |
@@ -272,7 +321,8 @@ Linux `~/.config/remotly/`.
 | `keyframeInterval` | `4` | Sekunden; bei Paketverlust wird sofort ein neues Keyframe erzeugt |
 | `localCursor` | `auto` | `auto` (Windows an), `on`, `off` |
 | `audio` | `auto` | `auto`, `off` (oder eigene ffmpeg-Eingabe in `audioArgs`) |
-| `clipboard` | `true` | Zwischenablage synchronisieren |
+| `clipboard` | `true` | Zwischenablage synchronisieren (zusätzlich gilt die Server-Richtlinie) |
+| `autoUpdate` | `auto` | `auto` (an, außer macOS), `on`, `off` |
 
 `remotly-agent probe` zeigt erkannte Encoder, Aufnahme-Varianten und Ton.
 Nach Änderungen: Dienst neu starten (`Restart-Service RemotlyAgent`).
@@ -295,7 +345,8 @@ Nach Änderungen: Dienst neu starten (`Restart-Service RemotlyAgent`).
 
 - Kein Mikrofon-, Webcam- oder USB-Durchreichen (für Telefonie im Büro das Headset
   am Thin Client mit einem Softphone/Teams im Browser nutzen).
-- Ein Monitor pro Sitzung (wählbar über `display`).
+- Ein Monitor gleichzeitig pro Sitzung (umschaltbar). Unter Windows wird die
+  Monitor-Reihenfolge der Grafikkarte (DXGI) angenommen: 0 = Hauptbildschirm.
 - macOS: kein Zugriff auf das Anmeldefenster vor der Benutzeranmeldung; Cursor wird
   im Video übertragen.
 - Linux-Agent: nur X11 (kein Wayland), Eingabe über `xdotool`.

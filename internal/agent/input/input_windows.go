@@ -500,6 +500,18 @@ func foreignPtr(p uintptr) unsafe.Pointer {
 	return *(*unsafe.Pointer)(unsafe.Pointer(&p))
 }
 
+func (p *winPlatform) displays() int {
+	n := 1
+	p.sync(func() {
+		displayRect(0)
+		n = len(enumOthers)
+		if enumPrimary.Right > enumPrimary.Left {
+			n++
+		}
+	})
+	return max(n, 1)
+}
+
 func pick(cond bool, a, b uint32) uint32 {
 	if cond {
 		return a
